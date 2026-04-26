@@ -10,6 +10,7 @@ include(${CMAKE_CURRENT_BINARY_DIR}/cmake/CPM.cmake)
 find_package(Vulkan REQUIRED)
 find_package(VulkanMemoryAllocator REQUIRED)
 find_package(Boost REQUIRED)
+find_package(boost_serialization CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(TBB REQUIRED)
 find_package(meshoptimizer CONFIG REQUIRED)
@@ -86,6 +87,7 @@ set(DEPS_LIBRARIES
   mr-math::mr-math
   mr-utils::mr-utils
   ${MR_IMPORTER_TARGET}
+  Boost::serialization
 
   Tracy::TracyClient
 )
