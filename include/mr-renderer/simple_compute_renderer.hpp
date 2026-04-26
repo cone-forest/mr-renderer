@@ -5,8 +5,8 @@
 #include "renderer.hpp"
 
 namespace mr {
-  struct ForwardRenderer : IRenderer {
-    ForwardRenderer(uint32_t width, uint32_t height);
+  struct SimpleComputeRenderer : IRenderer {
+    SimpleComputeRenderer(uint32_t width, uint32_t height);
 
     coro::generator<Frame> frames() override;
 

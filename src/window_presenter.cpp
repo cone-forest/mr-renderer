@@ -147,27 +147,25 @@ namespace mr {
 
       destroy_staging();
 
-      VkBufferCreateInfo buffer_info{};
-      buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+      vk::BufferCreateInfo buffer_info{};
       buffer_info.size = required_size;
-      buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-      buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+      buffer_info.usage = vk::BufferUsageFlagBits::eTransferSrc;
+      buffer_info.sharingMode = vk::SharingMode::eExclusive;
       const VkResult buffer_result =
-        vkCreateBuffer(vkb_device.device, &buffer_info, nullptr, &staging_buffer);
+        vkCreateBuffer(vkb_device.device, reinterpret_cast<const VkBufferCreateInfo*>(&buffer_info), nullptr, &staging_buffer);
       ASSERT(buffer_result == VK_SUCCESS, "vkCreateBuffer for staging failed");
 
       VkMemoryRequirements mem_req{};
       vkGetBufferMemoryRequirements(vkb_device.device, staging_buffer, &mem_req);
 
-      VkMemoryAllocateInfo alloc_info{};
-      alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+      vk::MemoryAllocateInfo alloc_info{};
       alloc_info.allocationSize = mem_req.size;
       alloc_info.memoryTypeIndex = find_memory_type(
         mem_req.memoryTypeBits,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 
       const VkResult alloc_result =
-        vkAllocateMemory(vkb_device.device, &alloc_info, nullptr, &staging_memory);
+        vkAllocateMemory(vkb_device.device, reinterpret_cast<const VkMemoryAllocateInfo*>(&alloc_info), nullptr, &staging_memory);
       ASSERT(alloc_result == VK_SUCCESS, "vkAllocateMemory for staging failed");
 
       const VkResult bind_result =
@@ -342,51 +340,45 @@ namespace mr {
 
       ASSERT(vkResetCommandBuffer(command_buffer, 0) == VK_SUCCESS, "vkResetCommandBuffer failed");
 
-      VkCommandBufferBeginInfo begin_info{};
-      begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-      begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-      ASSERT(vkBeginCommandBuffer(command_buffer, &begin_info) == VK_SUCCESS,
+      vk::CommandBufferBeginInfo begin_info{};
+      begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+      ASSERT(vkBeginCommandBuffer(command_buffer, reinterpret_cast<const VkCommandBufferBeginInfo*>(&begin_info)) == VK_SUCCESS,
         "vkBeginCommandBuffer failed");
 
-      VkImageMemoryBarrier to_transfer{};
-      to_transfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-      to_transfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-      to_transfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+      vk::ImageMemoryBarrier to_transfer{};
+      to_transfer.oldLayout = vk::ImageLayout::eUndefined;
+      to_transfer.newLayout = vk::ImageLayout::eTransferDstOptimal;
       to_transfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
       to_transfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
       to_transfer.image = image;
-      to_transfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      to_transfer.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
       to_transfer.subresourceRange.baseMipLevel = 0;
       to_transfer.subresourceRange.levelCount = 1;
       to_transfer.subresourceRange.baseArrayLayer = 0;
       to_transfer.subresourceRange.layerCount = 1;
-      to_transfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      to_transfer.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
 
       vkCmdPipelineBarrier(
         command_buffer,
-        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        static_cast<VkPipelineStageFlags>(vk::PipelineStageFlagBits::eTopOfPipe),
+        static_cast<VkPipelineStageFlags>(vk::PipelineStageFlagBits::eTransfer),
         0,
         0,
         nullptr,
         0,
         nullptr,
         1,
-        &to_transfer);
+        reinterpret_cast<const VkImageMemoryBarrier*>(&to_transfer));
 
-      VkBufferImageCopy copy_region{};
+      vk::BufferImageCopy copy_region{};
       copy_region.bufferOffset = 0;
       copy_region.bufferRowLength = 0;
       copy_region.bufferImageHeight = 0;
-      copy_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      copy_region.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
       copy_region.imageSubresource.mipLevel = 0;
       copy_region.imageSubresource.baseArrayLayer = 0;
       copy_region.imageSubresource.layerCount = 1;
-      copy_region.imageExtent = {
-        swapchain_extent.width,
-        swapchain_extent.height,
-        1u,
-      };
+      copy_region.imageExtent = vk::Extent3D{swapchain_extent.width, swapchain_extent.height, 1u};
 
       vkCmdCopyBufferToImage(
         command_buffer,
@@ -394,57 +386,60 @@ namespace mr {
         image,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         1,
-        &copy_region);
+        reinterpret_cast<const VkBufferImageCopy*>(&copy_region));
 
-      VkImageMemoryBarrier to_present{};
-      to_present.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-      to_present.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-      to_present.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+      vk::ImageMemoryBarrier to_present{};
+      to_present.oldLayout = vk::ImageLayout::eTransferDstOptimal;
+      to_present.newLayout = vk::ImageLayout::ePresentSrcKHR;
       to_present.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
       to_present.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
       to_present.image = image;
-      to_present.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      to_present.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
       to_present.subresourceRange.baseMipLevel = 0;
       to_present.subresourceRange.levelCount = 1;
       to_present.subresourceRange.baseArrayLayer = 0;
       to_present.subresourceRange.layerCount = 1;
-      to_present.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      to_present.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
 
       vkCmdPipelineBarrier(
         command_buffer,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        static_cast<VkPipelineStageFlags>(vk::PipelineStageFlagBits::eTransfer),
+        static_cast<VkPipelineStageFlags>(vk::PipelineStageFlagBits::eBottomOfPipe),
         0,
         0,
         nullptr,
         0,
         nullptr,
         1,
-        &to_present);
+        reinterpret_cast<const VkImageMemoryBarrier*>(&to_present));
 
       ASSERT(vkEndCommandBuffer(command_buffer) == VK_SUCCESS, "vkEndCommandBuffer failed");
 
-      VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-      VkSubmitInfo submit_info{};
-      submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      const vk::Semaphore wait_semaphore = image_available;
+      const vk::Semaphore signal_semaphore = render_finished;
+      const vk::CommandBuffer submit_command_buffer = command_buffer;
+      const vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
+      vk::SubmitInfo submit_info{};
       submit_info.waitSemaphoreCount = 1;
-      submit_info.pWaitSemaphores = &image_available;
+      submit_info.pWaitSemaphores = &wait_semaphore;
       submit_info.pWaitDstStageMask = &wait_stage;
       submit_info.commandBufferCount = 1;
-      submit_info.pCommandBuffers = &command_buffer;
+      submit_info.pCommandBuffers = &submit_command_buffer;
       submit_info.signalSemaphoreCount = 1;
-      submit_info.pSignalSemaphores = &render_finished;
+      submit_info.pSignalSemaphores = &signal_semaphore;
 
-      ASSERT(vkQueueSubmit(queue, 1, &submit_info, in_flight) == VK_SUCCESS, "vkQueueSubmit failed");
+      ASSERT(vkQueueSubmit(queue, 1, reinterpret_cast<const VkSubmitInfo*>(&submit_info), in_flight) == VK_SUCCESS,
+        "vkQueueSubmit failed");
 
-      VkPresentInfoKHR present_info{};
-      present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+      vk::PresentInfoKHR present_info{};
+      const vk::SwapchainKHR present_swapchain = vkb_swapchain.swapchain;
       present_info.waitSemaphoreCount = 1;
-      present_info.pWaitSemaphores = &render_finished;
+      present_info.pWaitSemaphores = &signal_semaphore;
       present_info.swapchainCount = 1;
-      present_info.pSwapchains = &vkb_swapchain.swapchain;
+      present_info.pSwapchains = &present_swapchain;
       present_info.pImageIndices = &image_index;
-      const VkResult present_result = vkQueuePresentKHR(queue, &present_info);
+      const VkResult present_result =
+        vkQueuePresentKHR(queue, reinterpret_cast<const VkPresentInfoKHR*>(&present_info));
       ASSERT(
         present_result == VK_SUCCESS || present_result == VK_SUBOPTIMAL_KHR || present_result == VK_ERROR_OUT_OF_DATE_KHR,
         "vkQueuePresentKHR failed");

@@ -1,6 +1,6 @@
 #include "pch.hpp"
 #include "vulkan_init.hpp"
-#include <mr-renderer/forward_renderer.hpp>
+#include <mr-renderer/simple_compute_renderer.hpp>
 
 #include <algorithm>
 #include <mr-importer/compiler.hpp>
@@ -132,12 +132,12 @@ namespace mr {
 
   } // namespace
 
-  ForwardRenderer::ForwardRenderer(uint32_t width, uint32_t height)
+  SimpleComputeRenderer::SimpleComputeRenderer(uint32_t width, uint32_t height)
     : width_(width == 0 ? 1u : width)
     , height_(height == 0 ? 1u : height)
   {}
 
-  coro::generator<Frame> ForwardRenderer::frames()
+  coro::generator<Frame> SimpleComputeRenderer::frames()
   {
     const std::filesystem::path shader_path =
       std::filesystem::path(MR_RENDERER_LIB_SHADER_DIR) / "gradient.slang";

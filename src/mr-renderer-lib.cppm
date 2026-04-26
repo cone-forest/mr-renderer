@@ -11,7 +11,7 @@ export module mr.renderer.lib;
 
 export namespace mr {
   using ::mr::FilePresenter;
-  using ::mr::ForwardRenderer;
+  using ::mr::SimpleComputeRenderer;
   using ::mr::Frame;
   using ::mr::IPresenter;
   using ::mr::IRenderer;
