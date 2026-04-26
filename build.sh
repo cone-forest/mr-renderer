@@ -15,6 +15,8 @@ Options:
   --preset <name>   Configure preset to use (default: clang-debug)
   --debug           Shortcut for --preset clang-debug
   --release         Shortcut for --preset clang-release
+  --gnu-debug       Shortcut for --preset gnu-debug
+  --gnu-release     Shortcut for --preset gnu-release
   --test            Run tests after build (debug preset only)
   --no-fresh        Configure without --fresh
   -h, --help        Show this help message
@@ -37,6 +39,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --release)
       PRESET="clang-release"
+      shift
+      ;;
+    --gnu-debug)
+      PRESET="gnu-debug"
+      shift
+      ;;
+    --gnu-release)
+      PRESET="gnu-release"
       shift
       ;;
     --test)
@@ -62,9 +72,11 @@ done
 case "$PRESET" in
   clang-debug) BUILD_PRESET="build-debug" ;;
   clang-release) BUILD_PRESET="build-release" ;;
+  gnu-debug) BUILD_PRESET="build-gnu-debug" ;;
+  gnu-release) BUILD_PRESET="build-gnu-release" ;;
   *)
     echo "error: unsupported preset '$PRESET'"
-    echo "supported presets: clang-debug, clang-release"
+    echo "supported presets: clang-debug, clang-release, gnu-debug, gnu-release"
     exit 1
     ;;
 esac
@@ -81,10 +93,16 @@ echo "==> vcpkg root: $VCPKG_ROOT"
 echo "==> vcpkg installed dir: $VCPKG_INSTALLED_DIR"
 
 if [[ -z "${CC:-}" ]]; then
-  export CC=clang
+  case "$PRESET" in
+    gnu-debug|gnu-release) export CC=gcc ;;
+    *) export CC=clang ;;
+  esac
 fi
 if [[ -z "${CXX:-}" ]]; then
-  export CXX=clang++
+  case "$PRESET" in
+    gnu-debug|gnu-release) export CXX=g++ ;;
+    *) export CXX=clang++ ;;
+  esac
 fi
 echo "==> compiler for vcpkg/cmake: CC=$CC CXX=$CXX"
 
@@ -119,12 +137,16 @@ echo "==> building project..."
 cmake --build --preset "$BUILD_PRESET"
 
 if [[ $RUN_TESTS -eq 1 ]]; then
-  if [[ "$PRESET" != "clang-debug" ]]; then
-    echo "error: --test is only supported with clang-debug preset"
+  if [[ "$PRESET" != "clang-debug" && "$PRESET" != "gnu-debug" ]]; then
+    echo "error: --test is only supported with debug presets (clang-debug, gnu-debug)"
     exit 1
   fi
   echo "==> running tests..."
-  ctest --preset test-debug
+  if [[ "$PRESET" == "gnu-debug" ]]; then
+    ctest --preset test-gnu-debug
+  else
+    ctest --preset test-debug
+  fi
 fi
 
 echo "==> done"

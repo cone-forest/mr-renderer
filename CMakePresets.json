@@ -42,6 +42,30 @@
         "CC": "clang",
         "CXX": "clang++"
       }
+    },
+    {
+      "name": "gnu-debug",
+      "inherits": "base",
+      "displayName": "GNU Debug (C++26)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      },
+      "environment": {
+        "CC": "gcc",
+        "CXX": "g++"
+      }
+    },
+    {
+      "name": "gnu-release",
+      "inherits": "base",
+      "displayName": "GNU Release (C++26)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "environment": {
+        "CC": "gcc",
+        "CXX": "g++"
+      }
     }
   ],
   "buildPresets": [
@@ -52,12 +76,27 @@
     {
       "name": "build-release",
       "configurePreset": "clang-release"
+    },
+    {
+      "name": "build-gnu-debug",
+      "configurePreset": "gnu-debug"
+    },
+    {
+      "name": "build-gnu-release",
+      "configurePreset": "gnu-release"
     }
   ],
   "testPresets": [
     {
       "name": "test-debug",
       "configurePreset": "clang-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "test-gnu-debug",
+      "configurePreset": "gnu-debug",
       "output": {
         "outputOnFailure": true
       }
