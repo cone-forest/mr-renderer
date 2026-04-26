@@ -6,8 +6,8 @@
 
 #include <cmath>
 #include <cstdint>
+#include <libassert/assert.hpp>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -29,14 +29,15 @@ namespace mr {
 
   void FilePresenter::present(Frame frame)
   {
-    const auto& img = frame.color;
-    ASSERT(img.format == vk::Format::eR32G32B32A32Sfloat, "FilePresenter: expected R32G32B32A32_SFLOAT image data");
-    ASSERT(img.width > 0 && img.height > 0 && img.pixels.get() != nullptr, "FilePresenter: invalid image dimensions or pixel buffer");
+    ASSERT(frame.width > 0 && frame.height > 0, "FilePresenter: invalid image dimensions");
+    const size_t expected_floats =
+      static_cast<size_t>(frame.width) * static_cast<size_t>(frame.height) * 4u;
+    ASSERT(frame.rgba32f.size() >= expected_floats, "FilePresenter: frame RGBA32F buffer is too small");
 
-    const int w = img.width;
-    const int h = img.height;
+    const int w = static_cast<int>(frame.width);
+    const int h = static_cast<int>(frame.height);
     const size_t count = static_cast<size_t>(w) * static_cast<size_t>(h);
-    const auto* px = reinterpret_cast<const float*>(img.pixels.get());
+    const auto* px = frame.rgba32f.data();
 
     std::vector<uint8_t> rgba8(count * 4u);
     for (size_t i = 0; i < count; ++i) {

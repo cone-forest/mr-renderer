@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <libassert/assert.hpp>
 
 namespace mr {
   namespace {
@@ -213,9 +214,10 @@ namespace mr {
 
     void initialize(const Frame& frame)
     {
-      ASSERT(frame.color.width > 0 && frame.color.height > 0, "invalid frame size for window presenter");
-      ASSERT(frame.color.format == vk::Format::eR32G32B32A32Sfloat,
-        "WindowPresenter expects RGBA32F frame input");
+      ASSERT(frame.width > 0 && frame.height > 0, "invalid frame size for window presenter");
+      const size_t expected_floats =
+        static_cast<size_t>(frame.width) * static_cast<size_t>(frame.height) * 4u;
+      ASSERT(frame.rgba32f.size() >= expected_floats, "WindowPresenter expects RGBA32F frame input");
 
       const vkfw::Result init_result = vkfw::init();
       ASSERT(vkfw::check(init_result), "vkfw::init failed");
@@ -227,7 +229,7 @@ namespace mr {
       hints.clientAPI = vkfw::ClientAPI::eNone;
       hints.resizable = false;
       const auto window_result =
-        vkfw::createWindow(frame.color.width, frame.color.height, "mr-renderer", hints);
+        vkfw::createWindow(static_cast<int>(frame.width), static_cast<int>(frame.height), "mr-renderer", hints);
       ASSERT(vkfw::check(window_result.result), "vkfw::createWindow failed");
       ASSERT(window_result.value, "vkfw::createWindow returned null window");
       window = window_result.value;
@@ -299,18 +301,20 @@ namespace mr {
       ASSERT(vkCreateFence(vkb_device.device, &fence_info, nullptr, &in_flight) == VK_SUCCESS,
         "vkCreateFence failed");
 
-      recreate_swapchain(frame.color.width, frame.color.height);
+      recreate_swapchain(frame.width, frame.height);
     }
 
     void upload_frame_pixels(const Frame& frame)
     {
-      ASSERT(frame.color.width == static_cast<int32_t>(swapchain_extent.width),
+      ASSERT(frame.width == swapchain_extent.width,
         "frame width must match swapchain width");
-      ASSERT(frame.color.height == static_cast<int32_t>(swapchain_extent.height),
+      ASSERT(frame.height == swapchain_extent.height,
         "frame height must match swapchain height");
 
-      const auto* src = reinterpret_cast<const float*>(frame.color.pixels.get());
-      ASSERT(src != nullptr, "frame pixel buffer is null");
+      const size_t expected_floats =
+        static_cast<size_t>(swapchain_extent.width) * static_cast<size_t>(swapchain_extent.height) * 4u;
+      ASSERT(frame.rgba32f.size() >= expected_floats, "frame pixel buffer is too small");
+      const float* src = frame.rgba32f.data();
 
       void* mapped = nullptr;
       ASSERT(vkMapMemory(vkb_device.device, staging_memory, 0, staging_size, 0, &mapped) == VK_SUCCESS,

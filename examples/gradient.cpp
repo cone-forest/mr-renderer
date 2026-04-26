@@ -1,8 +1,7 @@
-#if defined(MR_RENDERER_USE_MODULE)
+#include <coroutine>
+#include <utility>
+
 import mr.renderer.lib;
-#else
-#include <mr-renderer/mr-renderer.hpp>
-#endif
 
 int main()
 {

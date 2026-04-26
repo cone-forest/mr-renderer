@@ -18,19 +18,17 @@ file(GLOB_RECURSE PUBLIC_HEADERS
 
 add_library(mr-renderer-lib ${PRIVATE_SOURCES} ${PRIVATE_HEADERS})
 target_sources(mr-renderer-lib PUBLIC ${PUBLIC_HEADERS})
-if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  target_sources(
-    mr-renderer-lib
-    PUBLIC
-      FILE_SET cxx_modules TYPE CXX_MODULES FILES
-        ${CMAKE_CURRENT_LIST_DIR}/src/mr-renderer-lib.cppm
-  )
-  set_source_files_properties(
-    ${CMAKE_CURRENT_LIST_DIR}/src/mr-renderer-lib.cppm
-    PROPERTIES
-      SKIP_PRECOMPILE_HEADERS ON
-  )
-endif()
+target_sources(
+  mr-renderer-lib
+  PUBLIC
+    FILE_SET cxx_modules TYPE CXX_MODULES FILES
+      ${CMAKE_CURRENT_LIST_DIR}/src/mr-renderer-lib.cppm
+)
+set_source_files_properties(
+  ${CMAKE_CURRENT_LIST_DIR}/src/mr-renderer-lib.cppm
+  PROPERTIES
+    SKIP_PRECOMPILE_HEADERS ON
+)
 
 target_compile_definitions(
   mr-renderer-lib
@@ -68,9 +66,6 @@ target_precompile_headers(mr-renderer-lib PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/
 
 add_executable(gradient examples/gradient.cpp)
 target_link_libraries(gradient PRIVATE mr-renderer-lib)
-if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  target_compile_definitions(gradient PRIVATE MR_RENDERER_USE_MODULE=1)
-endif()
 if(MSVC)
   target_compile_options(gradient PRIVATE /EHs-c-)
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")

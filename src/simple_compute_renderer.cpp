@@ -3,6 +3,7 @@
 #include <mr-renderer/simple_compute_renderer.hpp>
 
 #include <algorithm>
+#include <libassert/assert.hpp>
 #include <mr-importer/compiler.hpp>
 
 #include <cstdlib>
@@ -37,28 +38,18 @@ namespace mr {
       return &(*it);
     }
 
-    void fill_image_data(
-      mr::importer::ImageData& dst,
+    void fill_frame_pixels(
+      Frame& dst,
       const std::vector<float>& linear_rgba,
-      int32_t w,
-      int32_t h)
+      uint32_t w,
+      uint32_t h)
     {
       const size_t expected_floats = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
       ASSERT(linear_rgba.size() >= expected_floats, "tensor data smaller than expected RGBA float image");
 
       dst.width = w;
       dst.height = h;
-      dst.depth = 1;
-      dst.bytes_per_pixel = 16;
-      dst.format = vk::Format::eR32G32B32A32Sfloat;
-
-      const size_t nbytes = expected_floats * sizeof(float);
-      dst.pixels = mr::importer::SizedUniqueArray<std::byte>(new std::byte[nbytes]);
-      dst.pixels.size(nbytes);
-      std::memcpy(dst.pixels.get(), linear_rgba.data(), nbytes);
-
-      dst.mips.clear();
-      dst.mips.emplace_back(dst.pixels.get(), nbytes);
+      dst.rgba32f.assign(linear_rgba.begin(), linear_rgba.begin() + expected_floats);
     }
 
     const char *physical_device_index_env()
@@ -151,8 +142,6 @@ namespace mr {
     const uint32_t physical_device_index = kompute_physical_device_index();
     kp::Manager mgr(physical_device_index);
 
-    const int32_t w = static_cast<int32_t>(width_);
-    const int32_t h = static_cast<int32_t>(height_);
     const size_t pixel_count = static_cast<size_t>(width_) * static_cast<size_t>(height_);
     std::vector<float> zero_rgba(pixel_count * 4u, 0.f);
 
@@ -188,7 +177,7 @@ namespace mr {
 
       Frame frame;
       frame.index = idx++;
-      fill_image_data(frame.color, output->vector(), w, h);
+      fill_frame_pixels(frame, output->vector(), width_, height_);
       co_yield std::move(frame);
     }
   }
