@@ -1,4 +1,5 @@
 #include "pch.hpp"
+#include "vulkan_init.hpp"
 #include <mr-renderer/forward_renderer.hpp>
 
 #include <algorithm>
@@ -60,38 +61,6 @@ namespace mr {
       dst.mips.emplace_back(dst.pixels.get(), nbytes);
     }
 
-    /**
-     * Properties for each physical device, in Vulkan enumeration order.
-     * Queries while the temporary vk::Instance is alive — vk::PhysicalDevice
-     * handles must not be used after the instance is destroyed.
-     */
-    std::vector<vk::PhysicalDeviceProperties> enumerate_physical_device_properties()
-    {
-      vk::ApplicationInfo application_info{};
-      application_info.pApplicationName = "mr-renderer-lib";
-      application_info.apiVersion = VK_MAKE_VERSION(1, 2, 0);
-
-      vk::InstanceCreateInfo instance_create_info{};
-      instance_create_info.pApplicationInfo = &application_info;
-
-#ifdef __APPLE__
-      const char *portability_ext = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
-      instance_create_info.enabledExtensionCount = 1;
-      instance_create_info.ppEnabledExtensionNames = &portability_ext;
-      instance_create_info.flags |= vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR;
-#endif
-
-      vk::Instance instance = vk::createInstance(instance_create_info);
-      const std::vector<vk::PhysicalDevice> devices = instance.enumeratePhysicalDevices();
-      std::vector<vk::PhysicalDeviceProperties> props;
-      props.reserve(devices.size());
-      std::ranges::transform(devices, std::back_inserter(props), [](const vk::PhysicalDevice& physdev) {
-        return physdev.getProperties();
-      });
-      instance.destroy(nullptr);
-      return props;
-    }
-
     const char *physical_device_index_env()
     {
       if (const char *var = std::getenv("MR_VK_PHYSICAL_DEVICE_INDEX")) {
@@ -107,8 +76,11 @@ namespace mr {
      */
     uint32_t kompute_physical_device_index()
     {
-      const std::vector<vk::PhysicalDeviceProperties> device_props =
-        enumerate_physical_device_properties();
+      const auto device_props_result = enumerate_vulkan_physical_devices();
+      ASSERT(device_props_result.has_value(),
+        "failed to enumerate Vulkan physical devices: ",
+        device_props_result.error());
+      const std::vector<VulkanPhysicalDeviceInfo>& device_props = *device_props_result;
       if (device_props.empty()) {
         return 0;
       }
@@ -136,13 +108,13 @@ namespace mr {
       bool have_nv_discrete = false;
 
       for (uint32_t i = 0; i < device_props.size(); ++i) {
-        const vk::PhysicalDeviceProperties &props = device_props[i];
-        if (props.deviceType == vk::PhysicalDeviceType::eDiscreteGpu) {
+        const VulkanPhysicalDeviceInfo &props = device_props[i];
+        if (props.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
           if (!have_discrete) {
             have_discrete = true;
             first_discrete = i;
           }
-          if (props.vendorID == kVendorNvidia && !have_nv_discrete) {
+          if (props.vendor_id == kVendorNvidia && !have_nv_discrete) {
             have_nv_discrete = true;
             first_discrete_nvidia = i;
           }

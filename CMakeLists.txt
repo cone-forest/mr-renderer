@@ -36,6 +36,11 @@ target_link_libraries(mr-renderer-lib PUBLIC ${DEPS_LIBRARIES})
 
 target_compile_features(mr-renderer-lib PUBLIC cxx_std_26)
 set_target_properties(mr-renderer-lib PROPERTIES CXX_EXTENSIONS OFF)
+if(MSVC)
+  target_compile_options(mr-renderer-lib PUBLIC /EHs-c-)
+else()
+  target_compile_options(mr-renderer-lib PUBLIC -fno-exceptions)
+endif()
 
 # libassert (via mr-utils) is built with GCC against libstdc++. With Clang and
 # -stdlib=libc++, the linker may drop -lstdc++ under --as-needed, causing
@@ -52,6 +57,11 @@ target_precompile_headers(mr-renderer-lib PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/
 
 add_executable(gradient examples/gradient.cpp)
 target_link_libraries(gradient PRIVATE mr-renderer-lib)
+if(MSVC)
+  target_compile_options(gradient PRIVATE /EHs-c-)
+else()
+  target_compile_options(gradient PRIVATE -fno-exceptions)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
