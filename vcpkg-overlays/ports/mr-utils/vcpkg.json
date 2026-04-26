@@ -1,0 +1,14 @@
+{
+  "name": "mr-utils",
+  "version": "1.1.2",
+  "description": "Collection of C++ utilities for 4J projects",
+  "homepage": "https://github.com/4J-company/mr-utils",
+  "license": "MIT",
+  "dependencies": [
+    "boost",
+    "libassert",
+    "spdlog",
+    "vcpkg-cmake",
+    "vcpkg-cmake-config"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "mr-importer",
+  "version": "3.4.0",
+  "description": "Opinionated asset importer",
+  "homepage": "https://github.com/4J-company/mr-importer",
+  "license": "MIT",
+  "dependencies": [
+    "draco",
+    "fastgltf",
+    "glm",
+    "ktx",
+    "meshoptimizer",
+    "mr-math",
+    "mr-utils",
+    "opensubdiv",
+    "shader-slang",
+    "spdlog",
+    "tbb",
+    "tracy",
+    "usd",
+    "vcpkg-cmake",
+    "vcpkg-cmake-config"
+  ]
+}

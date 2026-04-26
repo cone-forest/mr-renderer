@@ -1,0 +1,13 @@
+/build/
+build/
+/vcpkg_installed/
+/.cache/
+/.idea/
+/.vscode/
+/compile_commands.json
+frames_out/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store

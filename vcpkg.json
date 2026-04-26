@@ -1,0 +1,16 @@
+{
+  "name": "mr-renderer",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "boost",
+    "libcoro",
+    "glfw3",
+    "gtest",
+    "mr-importer",
+    "stb",
+    "tbb",
+    "usd",
+    "vulkan-memory-allocator",
+    "tracy"
+  ]
+}

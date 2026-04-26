@@ -1,0 +1,12 @@
+{
+  "name": "mr-math",
+  "version": "1.1.5",
+  "description": "Linear algebra library for computer graphics",
+  "homepage": "https://github.com/4J-company/mr-math",
+  "license": "MIT",
+  "dependencies": [
+    "vc",
+    "vcpkg-cmake",
+    "vcpkg-cmake-config"
+  ]
+}

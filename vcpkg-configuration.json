@@ -1,0 +1,20 @@
+{
+  "default-registry": {
+    "kind": "git",
+    "repository": "https://github.com/microsoft/vcpkg",
+    "baseline": "d7b75fa8a30478ae5b5eb86ac730f851ef036875"
+  },
+  "registries": [
+    {
+      "kind": "git",
+      "repository": "https://github.com/4J-company/vcpkg-registry",
+      "baseline": "9d420cbd4887f68366259242b6fdadbcec0cbf11",
+      "packages": [
+        "mr-importer",
+        "mr-manager",
+        "mr-math",
+        "mr-utils"
+      ]
+    }
+  ]
+}
