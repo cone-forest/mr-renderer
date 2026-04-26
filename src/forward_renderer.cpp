@@ -177,16 +177,17 @@ namespace mr {
     std::vector<std::shared_ptr<kp::Memory>> sync_to_device = {dims_buf, output};
     std::vector<std::shared_ptr<kp::Memory>> sync_from_device = {output};
 
-    constexpr uint32_t k_preview_frames = 3;
-    for (uint32_t i = 0; i < k_preview_frames; ++i) {
-      mgr.sequence()
+    auto seq = mgr.sequence()
         ->record<kp::OpSyncDevice>(sync_to_device)
         ->record<kp::OpAlgoDispatch>(algorithm)
-        ->record<kp::OpSyncLocal>(sync_from_device)
-        ->eval();
+        ->record<kp::OpSyncLocal>(sync_from_device);
+
+    int idx = 0;
+    while (true) {
+      seq->eval();
 
       Frame frame;
-      frame.index = i;
+      frame.index = idx++;
       fill_image_data(frame.color, output->vector(), w, h);
       co_yield std::move(frame);
     }
