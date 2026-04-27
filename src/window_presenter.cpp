@@ -235,12 +235,21 @@ namespace mr {
       window = window_result.value;
 
       const auto required_extensions = vkfw::getRequiredInstanceExtensions();
+      const bool enable_validation =
+#ifdef MR_RENDERER_ENABLE_VK_VALIDATION
+        true;
+#else
+        false;
+#endif
       vkb::InstanceBuilder instance_builder;
       instance_builder
         .set_app_name("mr-renderer")
-        .request_validation_layers(false)
+        .request_validation_layers(enable_validation)
         .require_api_version(1, 2, 0)
         .enable_extensions(required_extensions.size(), required_extensions.data());
+      if (enable_validation) {
+        instance_builder.use_default_debug_messenger();
+      }
 
       const auto instance_result = instance_builder.build();
       ASSERT(instance_result.has_value(), "vk-bootstrap instance creation failed");

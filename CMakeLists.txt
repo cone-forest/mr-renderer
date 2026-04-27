@@ -34,6 +34,7 @@ target_compile_definitions(
   mr-renderer-lib
   PRIVATE
   "MR_RENDERER_LIB_SHADER_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\""
+  $<$<CONFIG:Debug>:MR_RENDERER_ENABLE_VK_VALIDATION=1>
 )
 
 # dependencies

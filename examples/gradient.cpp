@@ -5,7 +5,7 @@ import mr.renderer.lib;
 
 int main()
 {
-  mr::SimpleComputeRenderer renderer{256, 256};
+  mr::KomputeGraphicsInteropRenderer renderer{256, 256};
   mr::FilePresenter presenter{"frames_out"};
 
   int frames_number = 3;

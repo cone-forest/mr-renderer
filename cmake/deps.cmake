@@ -54,8 +54,8 @@ endif()
 
 CPMFindPackage(
   NAME kompute
-  GITHUB_REPOSITORY KomputeProject/kompute
-  GIT_TAG master
+  GITHUB_REPOSITORY cone-forest/kompute
+  GIT_TAG feature/evalasync-semaphore-overload
   OPTIONS
     "KOMPUTE_OPT_USE_SPDLOG ON"
     "KOMPUTE_OPT_USE_BUILT_IN_SPDLOG OFF"
