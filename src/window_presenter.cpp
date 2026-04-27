@@ -9,8 +9,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <libassert/assert.hpp>
+#include <optional>
 
 namespace mr {
   namespace {
@@ -49,6 +51,7 @@ namespace mr {
 
     VkExtent2D swapchain_extent{0, 0};
     std::vector<VkImage> swapchain_images{};
+    bool warned_gpu_fallback = false;
 
     void destroy_staging()
     {
@@ -212,7 +215,7 @@ namespace mr {
                             static_cast<VkDeviceSize>(swapchain_extent.height) * 4u);
     }
 
-    void initialize(const Frame& frame)
+    void initialize(const CpuFrame& frame)
     {
       ASSERT(frame.width > 0 && frame.height > 0, "invalid frame size for window presenter");
       const size_t expected_floats =
@@ -313,7 +316,7 @@ namespace mr {
       recreate_swapchain(frame.width, frame.height);
     }
 
-    void upload_frame_pixels(const Frame& frame)
+    void upload_frame_pixels(const CpuFrame& frame)
     {
       ASSERT(frame.width == swapchain_extent.width,
         "frame width must match swapchain width");
@@ -480,8 +483,21 @@ namespace mr {
   {
     ASSERT(impl_ != nullptr, "WindowPresenter impl is null");
 
+    std::optional<CpuFrame> converted_cpu{};
+    const CpuFrame* cpu_frame = frame.cpu();
+    if (cpu_frame == nullptr) {
+      if (!impl_->warned_gpu_fallback) {
+        impl_->warned_gpu_fallback = true;
+        static_cast<void>(std::fprintf(
+          stderr,
+          "[mr-renderer] WindowPresenter warning: GPU frame fallback is using GPU->CPU readback path.\n"));
+      }
+      converted_cpu = frame.to_cpu_frame();
+      cpu_frame = &(*converted_cpu);
+    }
+
     if (!impl_->vkfw_initialized) {
-      impl_->initialize(frame);
+      impl_->initialize(*cpu_frame);
     }
 
     const auto poll_result = vkfw::pollEvents();
@@ -517,7 +533,7 @@ namespace mr {
       return;
     }
 
-    impl_->upload_frame_pixels(frame);
+    impl_->upload_frame_pixels(*cpu_frame);
     impl_->submit_copy_and_present(image_index);
   }
 }

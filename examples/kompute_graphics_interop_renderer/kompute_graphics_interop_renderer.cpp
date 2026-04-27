@@ -106,8 +106,6 @@ namespace mr {
     IndexBuffer index_buffer{};
     std::optional<ColorAttachmentImage> color_image{};
 
-    HostBuffer readback_buffer{};
-
     GraphicsPipeline graphics_pipeline{};
 
     ~Impl() { shutdown(); }
@@ -243,12 +241,6 @@ namespace mr {
         *vulkan_context,
         vk::Extent3D{width, height, 1u},
         vk::Format::eR8G8B8A8Unorm);
-
-      readback_buffer = HostBuffer(
-        *vulkan_context,
-        static_cast<vk::DeviceSize>(width) * static_cast<vk::DeviceSize>(height) * 4u,
-        vk::BufferUsageFlagBits::eTransferDst,
-        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
     }
 
     void create_graphics_pipeline(const std::filesystem::path& shader_path)
@@ -431,16 +423,6 @@ namespace mr {
       graphics_command_buffer.endRendering();
 
       color_image->transition_layout(graphics_command_buffer, vk::ImageLayout::eTransferSrcOptimal);
-
-      vk::BufferImageCopy copy_region{};
-      copy_region.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
-      copy_region.imageSubresource.layerCount = 1;
-      copy_region.imageExtent = vk::Extent3D{width, height, 1u};
-      graphics_command_buffer.copyImageToBuffer(
-        color_image->image(),
-        vk::ImageLayout::eTransferSrcOptimal,
-        readback_buffer.buffer(),
-        copy_region);
       ASSERT(graphics_command_buffer.end() == vk::Result::eSuccess,
         "vk::CommandBuffer::end(graphics) failed");
     }
@@ -469,22 +451,15 @@ namespace mr {
         "vk::Queue::submit(graphics) failed");
       ASSERT(vk::Device(device.device).waitForFences(graphics_fence, true, UINT64_MAX) == vk::Result::eSuccess,
         "vk::Device::waitForFences failed");
-
-      const auto readback_bytes = readback_buffer.read();
-      const auto* rgba8 = reinterpret_cast<const uint8_t*>(readback_bytes.data());
-
-      Frame frame;
-      frame.index = frame_index;
-      frame.width = width;
-      frame.height = height;
-      frame.rgba32f.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
-      for (size_t i = 0; i < static_cast<size_t>(width) * static_cast<size_t>(height); ++i) {
-        frame.rgba32f[i * 4u + 0u] = static_cast<float>(rgba8[i * 4u + 0u]) / 255.0f;
-        frame.rgba32f[i * 4u + 1u] = static_cast<float>(rgba8[i * 4u + 1u]) / 255.0f;
-        frame.rgba32f[i * 4u + 2u] = static_cast<float>(rgba8[i * 4u + 2u]) / 255.0f;
-        frame.rgba32f[i * 4u + 3u] = static_cast<float>(rgba8[i * 4u + 3u]) / 255.0f;
-      }
-      return frame;
+      ASSERT(color_image.has_value(), "color attachment image is not initialized");
+      GpuFrame gpu_frame{};
+      gpu_frame.context = vulkan_context.get();
+      gpu_frame.width = width;
+      gpu_frame.height = height;
+      gpu_frame.image = color_image->image();
+      gpu_frame.layout = vk::ImageLayout::eTransferSrcOptimal;
+      gpu_frame.format = vk::Format::eR8G8B8A8Unorm;
+      return Frame{frame_index, std::move(gpu_frame)};
     }
 
     void shutdown()
@@ -506,7 +481,6 @@ namespace mr {
       kp_instance.reset();
 
       graphics_pipeline = {};
-      readback_buffer = {};
       color_image.reset();
       index_buffer = {};
       vertex_buffer = {};

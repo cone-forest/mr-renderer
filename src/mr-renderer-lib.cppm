@@ -10,12 +10,15 @@ module;
 export module mr.renderer.lib;
 
 export namespace mr {
+  using ::mr::CpuFrame;
   using ::mr::FilePresenter;
   using ::mr::Frame;
+  using ::mr::FramePayload;
   using ::mr::GraphicsPipeline;
   using ::mr::GraphicsPipelineBuilder;
   using ::mr::GraphicsPipelineDesc;
   using ::mr::GraphicsShaderStageDesc;
+  using ::mr::GpuFrame;
   using ::mr::IPresenter;
   using ::mr::IRenderer;
   using ::mr::Buffer;

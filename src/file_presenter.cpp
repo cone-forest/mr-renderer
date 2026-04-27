@@ -5,6 +5,7 @@
 #include <stb_image_write.h>
 
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <libassert/assert.hpp>
 #include <sstream>
@@ -29,15 +30,22 @@ namespace mr {
 
   void FilePresenter::present(Frame frame)
   {
-    ASSERT(frame.width > 0 && frame.height > 0, "FilePresenter: invalid image dimensions");
+    if (frame.is_gpu() && !warned_gpu_fallback_) {
+      warned_gpu_fallback_ = true;
+      static_cast<void>(std::fprintf(
+        stderr,
+        "[mr-renderer] FilePresenter warning: consuming GPU frames requires GPU->CPU readback and may be slow.\n"));
+    }
+    CpuFrame cpu_frame = frame.to_cpu_frame();
+    ASSERT(cpu_frame.width > 0 && cpu_frame.height > 0, "FilePresenter: invalid image dimensions");
     const size_t expected_floats =
-      static_cast<size_t>(frame.width) * static_cast<size_t>(frame.height) * 4u;
-    ASSERT(frame.rgba32f.size() >= expected_floats, "FilePresenter: frame RGBA32F buffer is too small");
+      static_cast<size_t>(cpu_frame.width) * static_cast<size_t>(cpu_frame.height) * 4u;
+    ASSERT(cpu_frame.rgba32f.size() >= expected_floats, "FilePresenter: frame RGBA32F buffer is too small");
 
-    const int w = static_cast<int>(frame.width);
-    const int h = static_cast<int>(frame.height);
+    const int w = static_cast<int>(cpu_frame.width);
+    const int h = static_cast<int>(cpu_frame.height);
     const size_t count = static_cast<size_t>(w) * static_cast<size_t>(h);
-    const auto* px = frame.rgba32f.data();
+    const auto* px = cpu_frame.rgba32f.data();
 
     std::vector<uint8_t> rgba8(count * 4u);
     for (size_t i = 0; i < count; ++i) {

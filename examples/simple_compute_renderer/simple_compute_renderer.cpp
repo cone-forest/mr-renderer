@@ -39,7 +39,7 @@ namespace mr {
     }
 
     void fill_frame_pixels(
-      Frame& dst,
+      CpuFrame& dst,
       const std::vector<float>& linear_rgba,
       uint32_t w,
       uint32_t h)
@@ -175,10 +175,9 @@ namespace mr {
     while (true) {
       seq->eval();
 
-      Frame frame;
-      frame.index = idx++;
-      fill_frame_pixels(frame, output->vector(), width_, height_);
-      co_yield std::move(frame);
+      CpuFrame cpu_frame{};
+      fill_frame_pixels(cpu_frame, output->vector(), width_, height_);
+      co_yield Frame{static_cast<uint32_t>(idx++), std::move(cpu_frame)};
     }
   }
 

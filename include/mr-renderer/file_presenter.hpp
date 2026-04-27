@@ -12,5 +12,6 @@ namespace mr {
 
   private:
     std::filesystem::path output_directory_;
+    bool warned_gpu_fallback_ = false;
   };
 } // namespace mr
