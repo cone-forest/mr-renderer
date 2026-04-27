@@ -1,9 +1,9 @@
 #include "pch.hpp"
-#include "vulkan_init.hpp"
-#include <mr-renderer/simple_compute_renderer.hpp>
+#include "simple_compute_renderer.hpp"
 
 #include <algorithm>
 #include <libassert/assert.hpp>
+#include <mr-renderer/vulkan_wrappers.hpp>
 #include <mr-importer/compiler.hpp>
 
 #include <cstdlib>

@@ -43,13 +43,13 @@ target_link_libraries(mr-renderer-lib PUBLIC ${DEPS_LIBRARIES})
 target_compile_features(mr-renderer-lib PUBLIC cxx_std_26)
 set_target_properties(mr-renderer-lib PROPERTIES CXX_EXTENSIONS OFF)
 if(MSVC)
-  target_compile_options(mr-renderer-lib PUBLIC /EHs-c-)
+  target_compile_options(mr-renderer-lib PRIVATE /EHs-c-)
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   # Kompute exposes throw statements in public inline/template code, which GCC
   # rejects under -fno-exceptions during header parse.
-  target_compile_options(mr-renderer-lib PUBLIC -fexceptions)
+  target_compile_options(mr-renderer-lib PRIVATE -fexceptions)
 else()
-  target_compile_options(mr-renderer-lib PUBLIC -fno-exceptions)
+  target_compile_options(mr-renderer-lib PRIVATE -fno-exceptions)
 endif()
 
 # libassert (via mr-utils) is built with GCC against libstdc++. With Clang and
@@ -65,15 +65,7 @@ endif()
 target_include_directories(mr-renderer-lib PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include)
 target_precompile_headers(mr-renderer-lib PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src/pch.hpp)
 
-add_executable(gradient examples/gradient.cpp)
-target_link_libraries(gradient PRIVATE mr-renderer-lib)
-if(MSVC)
-  target_compile_options(gradient PRIVATE /EHs-c-)
-elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  target_compile_options(gradient PRIVATE -fexceptions)
-else()
-  target_compile_options(gradient PRIVATE -fno-exceptions)
-endif()
+add_subdirectory(examples)
 
 include(CTest)
 if(BUILD_TESTING)

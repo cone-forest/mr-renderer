@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "renderer.hpp"
+#include <mr-renderer/renderer.hpp>
 
 namespace mr {
   struct SimpleComputeRenderer : IRenderer {

@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <memory>
 
-#include "renderer.hpp"
+#include <mr-renderer/renderer.hpp>
 
 namespace mr {
   struct KomputeGraphicsInteropRenderer : IRenderer {

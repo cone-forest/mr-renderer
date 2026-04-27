@@ -8,7 +8,7 @@ add_test(
   NAME gradient_frames_match_golden
   COMMAND
     "${Python3_EXECUTABLE}" "${GRADIENT_TEST_SCRIPT}"
-    --example "$<TARGET_FILE:gradient>"
+    --example "$<TARGET_FILE:simple_compute_renderer>"
     --golden-dir "${GRADIENT_GOLDEN_DIR}"
     --output-dir "${GRADIENT_OUTPUT_DIR}"
 )
