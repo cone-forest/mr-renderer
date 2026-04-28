@@ -1546,6 +1546,40 @@ namespace mr {
   {}
 
   struct FrameRecorder::Impl {
+    enum class ResourceKind {
+      Buffer,
+      Image,
+    };
+
+    struct ResourceUsage {
+      ResourceKind kind = ResourceKind::Buffer;
+      uint64_t resource_key = 0;
+      vk::Buffer buffer{};
+      vk::Image image{};
+      vk::DeviceSize offset = 0;
+      vk::DeviceSize size = VK_WHOLE_SIZE;
+      vk::ImageSubresourceRange subresource_range{};
+      vk::ImageLayout layout = vk::ImageLayout::eUndefined;
+      vk::PipelineStageFlags2 stage = vk::PipelineStageFlagBits2::eAllCommands;
+      vk::AccessFlags2 access = vk::AccessFlagBits2::eMemoryRead;
+      bool writes = false;
+    };
+
+    struct ResourceState {
+      ResourceKind kind = ResourceKind::Buffer;
+      QueueTarget queue_target = QueueTarget::Graphics;
+      uint32_t queue_family = std::numeric_limits<uint32_t>::max();
+      vk::PipelineStageFlags2 stage = vk::PipelineStageFlagBits2::eAllCommands;
+      vk::AccessFlags2 access = vk::AccessFlagBits2::eMemoryRead;
+      vk::ImageLayout layout = vk::ImageLayout::eUndefined;
+      bool writes = false;
+    };
+
+    struct EnqueuedSubmission {
+      RecordedCommandBuffer command_buffer{};
+      std::vector<ResourceUsage> usages{};
+    };
+
     struct ThreadPools {
       vk::CommandPool graphics_pool{};
       vk::CommandPool compute_pool{};
@@ -1554,8 +1588,8 @@ namespace mr {
     struct FrameState {
       std::vector<ThreadPools> thread_pools{};
       std::unordered_map<std::thread::id, uint32_t> thread_slots{};
-      std::vector<RecordedCommandBuffer> graphics_submissions{};
-      std::vector<RecordedCommandBuffer> compute_submissions{};
+      std::vector<EnqueuedSubmission> graphics_submissions{};
+      std::vector<EnqueuedSubmission> compute_submissions{};
       uint64_t completion_timeline_value = 0;
       std::mutex mutex{};
     };
@@ -1566,6 +1600,9 @@ namespace mr {
     vk::Semaphore timeline_semaphore{};
     uint64_t timeline_counter = 0;
     uint64_t active_frame_number = 0;
+    std::unordered_map<uint64_t, std::vector<ResourceUsage>> pending_usages{};
+    std::unordered_map<uint64_t, ResourceState> resource_states{};
+    std::mutex resource_mutex{};
 
     Impl(const VulkanContext& in_context, CreateInfo in_create_info)
       : context(&in_context)
@@ -1628,6 +1665,21 @@ namespace mr {
     [[nodiscard]] vk::Queue queue_for(QueueTarget queue_target) const
     {
       return queue_target == QueueTarget::Graphics ? context->graphics_queue : context->compute_queue;
+    }
+
+    [[nodiscard]] static uint64_t command_key(vk::CommandBuffer command_buffer)
+    {
+      return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkCommandBuffer>(command_buffer)));
+    }
+
+    [[nodiscard]] static uint64_t buffer_key(vk::Buffer buffer)
+    {
+      return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkBuffer>(buffer)));
+    }
+
+    [[nodiscard]] static uint64_t image_key(vk::Image image)
+    {
+      return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkImage>(image)));
     }
 
     uint32_t acquire_thread_slot(FrameState& frame_state)
@@ -1765,16 +1817,73 @@ namespace mr {
     return {};
   }
 
+  void FrameRecorder::declare_buffer_usage(
+    const RecordedCommandBuffer& command_buffer,
+    const BufferUsageDesc& usage_desc)
+  {
+    ASSERT(impl_ != nullptr, "FrameRecorder is not initialized");
+    ASSERT(command_buffer.handle, "FrameRecorder::declare_buffer_usage requires a valid command buffer");
+    ASSERT(usage_desc.buffer, "FrameRecorder::declare_buffer_usage requires a valid buffer");
+
+    Impl::ResourceUsage usage{};
+    usage.kind = Impl::ResourceKind::Buffer;
+    usage.resource_key = Impl::buffer_key(usage_desc.buffer);
+    usage.buffer = usage_desc.buffer;
+    usage.offset = usage_desc.offset;
+    usage.size = usage_desc.size;
+    usage.stage = usage_desc.stage;
+    usage.access = usage_desc.access;
+    usage.writes = usage_desc.writes;
+
+    std::lock_guard lock(impl_->resource_mutex);
+    impl_->pending_usages[Impl::command_key(command_buffer.handle)].push_back(usage);
+  }
+
+  void FrameRecorder::declare_image_usage(
+    const RecordedCommandBuffer& command_buffer,
+    const ImageUsageDesc& usage_desc)
+  {
+    ASSERT(impl_ != nullptr, "FrameRecorder is not initialized");
+    ASSERT(command_buffer.handle, "FrameRecorder::declare_image_usage requires a valid command buffer");
+    ASSERT(usage_desc.image, "FrameRecorder::declare_image_usage requires a valid image");
+
+    Impl::ResourceUsage usage{};
+    usage.kind = Impl::ResourceKind::Image;
+    usage.resource_key = Impl::image_key(usage_desc.image);
+    usage.image = usage_desc.image;
+    usage.subresource_range = usage_desc.subresource_range;
+    usage.layout = usage_desc.layout;
+    usage.stage = usage_desc.stage;
+    usage.access = usage_desc.access;
+    usage.writes = usage_desc.writes;
+
+    std::lock_guard lock(impl_->resource_mutex);
+    impl_->pending_usages[Impl::command_key(command_buffer.handle)].push_back(usage);
+  }
+
   void FrameRecorder::enqueue_for_submit(const RecordedCommandBuffer& command_buffer)
   {
     ASSERT(impl_ != nullptr, "FrameRecorder is not initialized");
     FrameRecorder::Impl::FrameState& frame_state =
       *impl_->frames[impl_->active_frame_number % impl_->create_info.frames_in_flight];
+    std::vector<Impl::ResourceUsage> usages{};
+    {
+      std::lock_guard usage_lock(impl_->resource_mutex);
+      const uint64_t command_buffer_key = Impl::command_key(command_buffer.handle);
+      if (const auto it = impl_->pending_usages.find(command_buffer_key); it != impl_->pending_usages.end()) {
+        usages = std::move(it->second);
+        impl_->pending_usages.erase(it);
+      }
+    }
     std::lock_guard lock(frame_state.mutex);
+    Impl::EnqueuedSubmission submission{
+      .command_buffer = command_buffer,
+      .usages = std::move(usages),
+    };
     if (command_buffer.queue_target == QueueTarget::Graphics) {
-      frame_state.graphics_submissions.push_back(command_buffer);
+      frame_state.graphics_submissions.push_back(std::move(submission));
     } else {
-      frame_state.compute_submissions.push_back(command_buffer);
+      frame_state.compute_submissions.push_back(std::move(submission));
     }
   }
 
@@ -1786,8 +1895,8 @@ namespace mr {
     FrameRecorder::Impl::FrameState& frame_state =
       *impl_->frames[impl_->active_frame_number % impl_->create_info.frames_in_flight];
 
-    std::vector<RecordedCommandBuffer> graphics_submissions{};
-    std::vector<RecordedCommandBuffer> compute_submissions{};
+    std::vector<Impl::EnqueuedSubmission> graphics_submissions{};
+    std::vector<Impl::EnqueuedSubmission> compute_submissions{};
     {
       std::lock_guard lock(frame_state.mutex);
       graphics_submissions = frame_state.graphics_submissions;
@@ -1800,16 +1909,105 @@ namespace mr {
 
     uint64_t final_timeline_value = impl_->timeline_counter;
     const auto submit_one_queue =
-      [&](QueueTarget queue_target, const std::vector<RecordedCommandBuffer>& submissions) -> std::expected<void, std::string> {
+      [&](QueueTarget queue_target, const std::vector<Impl::EnqueuedSubmission>& submissions) -> std::expected<void, std::string> {
       if (submissions.empty()) {
         return {};
       }
 
       std::vector<vk::CommandBufferSubmitInfo> command_infos{};
-      command_infos.reserve(submissions.size());
+      command_infos.reserve(submissions.size() * 2);
+      std::vector<vk::CommandBuffer> barrier_command_buffers{};
       for (const auto& submission : submissions) {
+        std::vector<vk::BufferMemoryBarrier2> buffer_barriers{};
+        std::vector<vk::ImageMemoryBarrier2> image_barriers{};
+        buffer_barriers.reserve(submission.usages.size());
+        image_barriers.reserve(submission.usages.size());
+
+        {
+          std::lock_guard state_lock(impl_->resource_mutex);
+          for (const auto& usage : submission.usages) {
+            const auto prev_it = impl_->resource_states.find(usage.resource_key);
+            const bool has_prev = prev_it != impl_->resource_states.end();
+            const bool same_queue_family =
+              has_prev && prev_it->second.queue_family == submission.command_buffer.queue_family;
+
+            if (has_prev && same_queue_family && (prev_it->second.writes || usage.writes)) {
+              if (usage.kind == Impl::ResourceKind::Buffer) {
+                vk::BufferMemoryBarrier2 barrier{};
+                barrier.srcStageMask = prev_it->second.stage;
+                barrier.srcAccessMask = prev_it->second.access;
+                barrier.dstStageMask = usage.stage;
+                barrier.dstAccessMask = usage.access;
+                barrier.srcQueueFamilyIndex = submission.command_buffer.queue_family;
+                barrier.dstQueueFamilyIndex = submission.command_buffer.queue_family;
+                barrier.buffer = usage.buffer;
+                barrier.offset = usage.offset;
+                barrier.size = usage.size;
+                buffer_barriers.push_back(barrier);
+              } else {
+                vk::ImageMemoryBarrier2 barrier{};
+                barrier.srcStageMask = prev_it->second.stage;
+                barrier.srcAccessMask = prev_it->second.access;
+                barrier.dstStageMask = usage.stage;
+                barrier.dstAccessMask = usage.access;
+                barrier.oldLayout = prev_it->second.layout;
+                barrier.newLayout = usage.layout;
+                barrier.srcQueueFamilyIndex = submission.command_buffer.queue_family;
+                barrier.dstQueueFamilyIndex = submission.command_buffer.queue_family;
+                barrier.image = usage.image;
+                barrier.subresourceRange = usage.subresource_range;
+                image_barriers.push_back(barrier);
+              }
+            }
+
+            impl_->resource_states[usage.resource_key] = Impl::ResourceState{
+              .kind = usage.kind,
+              .queue_target = submission.command_buffer.queue_target,
+              .queue_family = submission.command_buffer.queue_family,
+              .stage = usage.stage,
+              .access = usage.access,
+              .layout = usage.layout,
+              .writes = usage.writes,
+            };
+          }
+        }
+
+        if (!buffer_barriers.empty() || !image_barriers.empty()) {
+          const uint32_t thread_slot = impl_->acquire_thread_slot(frame_state);
+          vk::CommandPool& command_pool = impl_->command_pool_for(frame_state, thread_slot, queue_target);
+          vk::CommandBufferAllocateInfo alloc_info{};
+          alloc_info.commandPool = command_pool;
+          alloc_info.level = vk::CommandBufferLevel::ePrimary;
+          alloc_info.commandBufferCount = 1;
+          const auto barrier_cmd_rv = impl_->context->vk_device().allocateCommandBuffers(alloc_info);
+          if (barrier_cmd_rv.result != vk::Result::eSuccess) {
+            return std::unexpected("FrameRecorder failed to allocate barrier command buffer");
+          }
+          vk::CommandBuffer barrier_cmd = barrier_cmd_rv.value[0];
+
+          vk::CommandBufferBeginInfo begin_info{};
+          begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+          if (barrier_cmd.begin(begin_info) != vk::Result::eSuccess) {
+            return std::unexpected("FrameRecorder failed to begin barrier command buffer");
+          }
+          vk::DependencyInfo dependency_info{};
+          dependency_info.bufferMemoryBarrierCount = static_cast<uint32_t>(buffer_barriers.size());
+          dependency_info.pBufferMemoryBarriers = buffer_barriers.data();
+          dependency_info.imageMemoryBarrierCount = static_cast<uint32_t>(image_barriers.size());
+          dependency_info.pImageMemoryBarriers = image_barriers.data();
+          barrier_cmd.pipelineBarrier2(dependency_info);
+          if (barrier_cmd.end() != vk::Result::eSuccess) {
+            return std::unexpected("FrameRecorder failed to end barrier command buffer");
+          }
+          barrier_command_buffers.push_back(barrier_cmd);
+
+          vk::CommandBufferSubmitInfo barrier_cmd_info{};
+          barrier_cmd_info.commandBuffer = barrier_cmd;
+          command_infos.push_back(barrier_cmd_info);
+        }
+
         vk::CommandBufferSubmitInfo cmd_info{};
-        cmd_info.commandBuffer = submission.handle;
+        cmd_info.commandBuffer = submission.command_buffer.handle;
         command_infos.push_back(cmd_info);
       }
 

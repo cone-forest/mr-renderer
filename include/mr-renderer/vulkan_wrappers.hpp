@@ -108,6 +108,24 @@ namespace mr {
       uint32_t queue_family = std::numeric_limits<uint32_t>::max();
     };
 
+    struct BufferUsageDesc {
+      vk::Buffer buffer{};
+      vk::DeviceSize offset = 0;
+      vk::DeviceSize size = VK_WHOLE_SIZE;
+      vk::PipelineStageFlags2 stage = vk::PipelineStageFlagBits2::eAllCommands;
+      vk::AccessFlags2 access = vk::AccessFlagBits2::eMemoryRead;
+      bool writes = false;
+    };
+
+    struct ImageUsageDesc {
+      vk::Image image{};
+      vk::ImageSubresourceRange subresource_range{};
+      vk::ImageLayout layout = vk::ImageLayout::eGeneral;
+      vk::PipelineStageFlags2 stage = vk::PipelineStageFlagBits2::eAllCommands;
+      vk::AccessFlags2 access = vk::AccessFlagBits2::eMemoryRead;
+      bool writes = false;
+    };
+
     explicit FrameRecorder(const VulkanContext& context);
     FrameRecorder(const VulkanContext& context, CreateInfo create_info);
     ~FrameRecorder();
@@ -122,6 +140,12 @@ namespace mr {
       QueueTarget queue_target,
       vk::CommandBufferUsageFlags usage_flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
     std::expected<void, std::string> end_recording(const RecordedCommandBuffer& command_buffer);
+    void declare_buffer_usage(
+      const RecordedCommandBuffer& command_buffer,
+      const BufferUsageDesc& usage_desc);
+    void declare_image_usage(
+      const RecordedCommandBuffer& command_buffer,
+      const ImageUsageDesc& usage_desc);
     void enqueue_for_submit(const RecordedCommandBuffer& command_buffer);
     std::expected<uint64_t, std::string> submit_frame();
 
