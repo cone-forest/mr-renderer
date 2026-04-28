@@ -14,6 +14,7 @@ export namespace mr {
   using ::mr::FilePresenter;
   using ::mr::Frame;
   using ::mr::FramePayload;
+  using ::mr::FrameRecorder;
   using ::mr::GraphicsPipeline;
   using ::mr::GraphicsPipelineBuilder;
   using ::mr::GraphicsPipelineDesc;
@@ -42,6 +43,7 @@ export namespace mr {
   using ::mr::SwapchainImage;
   using ::mr::TextureImage;
   using ::mr::UniformBuffer;
+  using ::mr::QueueTarget;
   using ::mr::VectorBuffer;
   using ::mr::VertexHeapBuffer;
   using ::mr::VertexVectorBuffer;

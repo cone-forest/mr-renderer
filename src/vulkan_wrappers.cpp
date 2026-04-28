@@ -12,6 +12,7 @@
 #include <fstream>
 #include <optional>
 #include <set>
+#include <thread>
 #include <utility>
 
 #define VMA_IMPLEMENTATION
@@ -1543,6 +1544,324 @@ namespace mr {
         mip_levels,
         create_image_view)
   {}
+
+  struct FrameRecorder::Impl {
+    struct ThreadPools {
+      vk::CommandPool graphics_pool{};
+      vk::CommandPool compute_pool{};
+    };
+
+    struct FrameState {
+      std::vector<ThreadPools> thread_pools{};
+      std::unordered_map<std::thread::id, uint32_t> thread_slots{};
+      std::vector<RecordedCommandBuffer> graphics_submissions{};
+      std::vector<RecordedCommandBuffer> compute_submissions{};
+      uint64_t completion_timeline_value = 0;
+      std::mutex mutex{};
+    };
+
+    const VulkanContext* context = nullptr;
+    CreateInfo create_info;
+    std::vector<std::unique_ptr<FrameState>> frames{};
+    vk::Semaphore timeline_semaphore{};
+    uint64_t timeline_counter = 0;
+    uint64_t active_frame_number = 0;
+
+    Impl(const VulkanContext& in_context, CreateInfo in_create_info)
+      : context(&in_context)
+      , create_info(in_create_info)
+    {
+      if (create_info.frames_in_flight == 0) {
+        create_info.frames_in_flight = 1;
+      }
+      if (create_info.max_recording_threads == 0) {
+        create_info.max_recording_threads = 1;
+      }
+      ASSERT(context->feature_support.synchronization2, "FrameRecorder requires synchronization2 support");
+      ASSERT(context->feature_support.timeline_semaphore, "FrameRecorder requires timeline semaphore support");
+
+      vk::SemaphoreTypeCreateInfo type_info{};
+      type_info.semaphoreType = vk::SemaphoreType::eTimeline;
+      type_info.initialValue = 0;
+      vk::SemaphoreCreateInfo semaphore_info{};
+      semaphore_info.pNext = &type_info;
+      const auto semaphore_rv = context->vk_device().createSemaphore(semaphore_info);
+      ASSERT(semaphore_rv.result == vk::Result::eSuccess, "FrameRecorder failed to create timeline semaphore");
+      timeline_semaphore = semaphore_rv.value;
+
+      frames.reserve(create_info.frames_in_flight);
+      for (uint32_t i = 0; i < create_info.frames_in_flight; ++i) {
+        auto frame = std::make_unique<FrameState>();
+        frame->thread_pools.resize(create_info.max_recording_threads);
+        frames.push_back(std::move(frame));
+      }
+    }
+
+    ~Impl()
+    {
+      if (!context) {
+        return;
+      }
+      for (auto& frame : frames) {
+        for (auto& pools : frame->thread_pools) {
+          if (pools.graphics_pool) {
+            context->vk_device().destroyCommandPool(pools.graphics_pool);
+            pools.graphics_pool = nullptr;
+          }
+          if (pools.compute_pool) {
+            context->vk_device().destroyCommandPool(pools.compute_pool);
+            pools.compute_pool = nullptr;
+          }
+        }
+      }
+      if (timeline_semaphore) {
+        context->vk_device().destroySemaphore(timeline_semaphore);
+        timeline_semaphore = nullptr;
+      }
+    }
+
+    [[nodiscard]] uint32_t queue_family_for(QueueTarget queue_target) const
+    {
+      return queue_target == QueueTarget::Graphics ? context->graphics_queue_family : context->compute_queue_family;
+    }
+
+    [[nodiscard]] vk::Queue queue_for(QueueTarget queue_target) const
+    {
+      return queue_target == QueueTarget::Graphics ? context->graphics_queue : context->compute_queue;
+    }
+
+    uint32_t acquire_thread_slot(FrameState& frame_state)
+    {
+      std::lock_guard lock(frame_state.mutex);
+      const std::thread::id tid = std::this_thread::get_id();
+      if (const auto it = frame_state.thread_slots.find(tid); it != frame_state.thread_slots.end()) {
+        return it->second;
+      }
+      const uint32_t slot = static_cast<uint32_t>(frame_state.thread_slots.size() % create_info.max_recording_threads);
+      frame_state.thread_slots[tid] = slot;
+      return slot;
+    }
+
+    vk::CommandPool& command_pool_for(FrameState& frame_state, uint32_t thread_slot, QueueTarget queue_target)
+    {
+      ThreadPools& pools = frame_state.thread_pools[thread_slot];
+      vk::CommandPool& selected_pool =
+        queue_target == QueueTarget::Graphics ? pools.graphics_pool : pools.compute_pool;
+      if (selected_pool) {
+        return selected_pool;
+      }
+      vk::CommandPoolCreateInfo pool_info{};
+      pool_info.flags = vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
+      pool_info.queueFamilyIndex = queue_family_for(queue_target);
+      const auto pool_rv = context->vk_device().createCommandPool(pool_info);
+      ASSERT(pool_rv.result == vk::Result::eSuccess, "FrameRecorder failed to create command pool");
+      selected_pool = pool_rv.value;
+      return selected_pool;
+    }
+  };
+
+  FrameRecorder::FrameRecorder(const VulkanContext& context)
+    : FrameRecorder(context, CreateInfo{})
+  {}
+
+  FrameRecorder::FrameRecorder(const VulkanContext& context, CreateInfo create_info)
+    : impl_(std::make_unique<Impl>(context, create_info))
+  {}
+
+  FrameRecorder::~FrameRecorder() = default;
+  FrameRecorder::FrameRecorder(FrameRecorder&&) noexcept = default;
+  FrameRecorder& FrameRecorder::operator=(FrameRecorder&&) noexcept = default;
+
+  std::expected<void, std::string> FrameRecorder::begin_frame(uint64_t frame_index)
+  {
+    if (!impl_) {
+      return std::unexpected("FrameRecorder is not initialized");
+    }
+    impl_->active_frame_number = frame_index;
+    FrameRecorder::Impl::FrameState& frame_state =
+      *impl_->frames[frame_index % impl_->create_info.frames_in_flight];
+
+    if (frame_state.completion_timeline_value > 0) {
+      vk::SemaphoreWaitInfo wait_info{};
+      wait_info.semaphoreCount = 1;
+      wait_info.pSemaphores = &impl_->timeline_semaphore;
+      wait_info.pValues = &frame_state.completion_timeline_value;
+      const auto wait_result = impl_->context->vk_device().waitSemaphores(wait_info, std::numeric_limits<uint64_t>::max());
+      if (wait_result != vk::Result::eSuccess) {
+        return std::unexpected("FrameRecorder waitSemaphores failed");
+      }
+    }
+
+    std::lock_guard lock(frame_state.mutex);
+    frame_state.graphics_submissions.clear();
+    frame_state.compute_submissions.clear();
+    for (auto& pools : frame_state.thread_pools) {
+      if (pools.graphics_pool) {
+        const auto reset_result = impl_->context->vk_device().resetCommandPool(
+          pools.graphics_pool,
+          vk::CommandPoolResetFlagBits::eReleaseResources);
+        if (reset_result != vk::Result::eSuccess) {
+          return std::unexpected("FrameRecorder resetCommandPool(graphics) failed");
+        }
+      }
+      if (pools.compute_pool) {
+        const auto reset_result = impl_->context->vk_device().resetCommandPool(
+          pools.compute_pool,
+          vk::CommandPoolResetFlagBits::eReleaseResources);
+        if (reset_result != vk::Result::eSuccess) {
+          return std::unexpected("FrameRecorder resetCommandPool(compute) failed");
+        }
+      }
+    }
+    return {};
+  }
+
+  std::expected<FrameRecorder::RecordedCommandBuffer, std::string> FrameRecorder::begin_recording(
+    QueueTarget queue_target,
+    vk::CommandBufferUsageFlags usage_flags)
+  {
+    if (!impl_) {
+      return std::unexpected("FrameRecorder is not initialized");
+    }
+    FrameRecorder::Impl::FrameState& frame_state =
+      *impl_->frames[impl_->active_frame_number % impl_->create_info.frames_in_flight];
+    const uint32_t thread_slot = impl_->acquire_thread_slot(frame_state);
+    vk::CommandPool& command_pool = impl_->command_pool_for(frame_state, thread_slot, queue_target);
+
+    vk::CommandBufferAllocateInfo alloc_info{};
+    alloc_info.commandPool = command_pool;
+    alloc_info.level = vk::CommandBufferLevel::ePrimary;
+    alloc_info.commandBufferCount = 1;
+    const auto cmd_rv = impl_->context->vk_device().allocateCommandBuffers(alloc_info);
+    if (cmd_rv.result != vk::Result::eSuccess) {
+      return std::unexpected("FrameRecorder allocateCommandBuffers failed");
+    }
+
+    vk::CommandBufferBeginInfo begin_info{};
+    begin_info.flags = usage_flags;
+    if (cmd_rv.value[0].begin(begin_info) != vk::Result::eSuccess) {
+      return std::unexpected("FrameRecorder command buffer begin failed");
+    }
+
+    return RecordedCommandBuffer{
+      .handle = cmd_rv.value[0],
+      .queue_target = queue_target,
+      .queue_family = impl_->queue_family_for(queue_target),
+    };
+  }
+
+  std::expected<void, std::string>
+  FrameRecorder::end_recording(const RecordedCommandBuffer& command_buffer)
+  {
+    if (!impl_) {
+      return std::unexpected("FrameRecorder is not initialized");
+    }
+    if (!command_buffer.handle) {
+      return std::unexpected("FrameRecorder end_recording received null command buffer");
+    }
+    if (command_buffer.handle.end() != vk::Result::eSuccess) {
+      return std::unexpected("FrameRecorder command buffer end failed");
+    }
+    return {};
+  }
+
+  void FrameRecorder::enqueue_for_submit(const RecordedCommandBuffer& command_buffer)
+  {
+    ASSERT(impl_ != nullptr, "FrameRecorder is not initialized");
+    FrameRecorder::Impl::FrameState& frame_state =
+      *impl_->frames[impl_->active_frame_number % impl_->create_info.frames_in_flight];
+    std::lock_guard lock(frame_state.mutex);
+    if (command_buffer.queue_target == QueueTarget::Graphics) {
+      frame_state.graphics_submissions.push_back(command_buffer);
+    } else {
+      frame_state.compute_submissions.push_back(command_buffer);
+    }
+  }
+
+  std::expected<uint64_t, std::string> FrameRecorder::submit_frame()
+  {
+    if (!impl_) {
+      return std::unexpected("FrameRecorder is not initialized");
+    }
+    FrameRecorder::Impl::FrameState& frame_state =
+      *impl_->frames[impl_->active_frame_number % impl_->create_info.frames_in_flight];
+
+    std::vector<RecordedCommandBuffer> graphics_submissions{};
+    std::vector<RecordedCommandBuffer> compute_submissions{};
+    {
+      std::lock_guard lock(frame_state.mutex);
+      graphics_submissions = frame_state.graphics_submissions;
+      compute_submissions = frame_state.compute_submissions;
+    }
+
+    if (graphics_submissions.empty() && compute_submissions.empty()) {
+      return impl_->timeline_counter;
+    }
+
+    uint64_t final_timeline_value = impl_->timeline_counter;
+    const auto submit_one_queue =
+      [&](QueueTarget queue_target, const std::vector<RecordedCommandBuffer>& submissions) -> std::expected<void, std::string> {
+      if (submissions.empty()) {
+        return {};
+      }
+
+      std::vector<vk::CommandBufferSubmitInfo> command_infos{};
+      command_infos.reserve(submissions.size());
+      for (const auto& submission : submissions) {
+        vk::CommandBufferSubmitInfo cmd_info{};
+        cmd_info.commandBuffer = submission.handle;
+        command_infos.push_back(cmd_info);
+      }
+
+      const uint64_t signal_value = ++impl_->timeline_counter;
+      vk::SemaphoreSubmitInfo signal_info{};
+      signal_info.semaphore = impl_->timeline_semaphore;
+      signal_info.value = signal_value;
+      signal_info.stageMask = vk::PipelineStageFlagBits2::eAllCommands;
+      signal_info.deviceIndex = 0;
+
+      vk::SubmitInfo2 submit_info{};
+      submit_info.commandBufferInfoCount = static_cast<uint32_t>(command_infos.size());
+      submit_info.pCommandBufferInfos = command_infos.data();
+      submit_info.signalSemaphoreInfoCount = 1;
+      submit_info.pSignalSemaphoreInfos = &signal_info;
+
+      const auto submit_result = impl_->queue_for(queue_target).submit2(submit_info, vk::Fence{});
+      if (submit_result != vk::Result::eSuccess) {
+        return std::unexpected("FrameRecorder queue submit2 failed");
+      }
+      final_timeline_value = signal_value;
+      return {};
+    };
+
+    if (const auto submit_result = submit_one_queue(QueueTarget::ComputeTransfer, compute_submissions);
+      !submit_result.has_value()) {
+      return std::unexpected(submit_result.error());
+    }
+    if (const auto submit_result = submit_one_queue(QueueTarget::Graphics, graphics_submissions);
+      !submit_result.has_value()) {
+      return std::unexpected(submit_result.error());
+    }
+
+    frame_state.completion_timeline_value = final_timeline_value;
+    return final_timeline_value;
+  }
+
+  uint64_t FrameRecorder::last_timeline_value() const noexcept
+  {
+    if (!impl_) {
+      return 0;
+    }
+    return impl_->timeline_counter;
+  }
+
+  vk::Semaphore FrameRecorder::timeline_semaphore() const noexcept
+  {
+    if (!impl_) {
+      return vk::Semaphore{};
+    }
+    return impl_->timeline_semaphore;
+  }
 
   GraphicsPipeline::~GraphicsPipeline()
   {

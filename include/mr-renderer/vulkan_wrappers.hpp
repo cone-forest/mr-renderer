@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <expected>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -88,6 +89,49 @@ namespace mr {
 
   std::expected<std::vector<VulkanPhysicalDeviceInfo>, std::string>
   enumerate_vulkan_physical_devices();
+
+  enum class QueueTarget {
+    Graphics,
+    ComputeTransfer,
+  };
+
+  class FrameRecorder {
+  public:
+    struct CreateInfo {
+      uint32_t frames_in_flight = 3;
+      uint32_t max_recording_threads = 8;
+    };
+
+    struct RecordedCommandBuffer {
+      vk::CommandBuffer handle{};
+      QueueTarget queue_target = QueueTarget::Graphics;
+      uint32_t queue_family = std::numeric_limits<uint32_t>::max();
+    };
+
+    explicit FrameRecorder(const VulkanContext& context);
+    FrameRecorder(const VulkanContext& context, CreateInfo create_info);
+    ~FrameRecorder();
+
+    FrameRecorder(const FrameRecorder&) = delete;
+    FrameRecorder& operator=(const FrameRecorder&) = delete;
+    FrameRecorder(FrameRecorder&&) noexcept;
+    FrameRecorder& operator=(FrameRecorder&&) noexcept;
+
+    std::expected<void, std::string> begin_frame(uint64_t frame_index);
+    std::expected<RecordedCommandBuffer, std::string> begin_recording(
+      QueueTarget queue_target,
+      vk::CommandBufferUsageFlags usage_flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit);
+    std::expected<void, std::string> end_recording(const RecordedCommandBuffer& command_buffer);
+    void enqueue_for_submit(const RecordedCommandBuffer& command_buffer);
+    std::expected<uint64_t, std::string> submit_frame();
+
+    [[nodiscard]] uint64_t last_timeline_value() const noexcept;
+    [[nodiscard]] vk::Semaphore timeline_semaphore() const noexcept;
+
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_{};
+  };
 
   struct BufferRegion {
     const VulkanContext* context = nullptr;
