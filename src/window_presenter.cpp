@@ -22,8 +22,8 @@ namespace mr {
       MR_TRACY_ZONE;
       x = std::clamp(x, 0.f, 1.f);
       const float s =
-        x <= 0.0031308f ? (12.92f * x) : (1.055f * std::pow(x, 1.f / 2.4f) - 0.055f);
-      const auto out = static_cast<long>(std::lround(s * 255.f));
+        x <= 0.0031308f ? (12.92f * x) : ((1.055f * std::pow(x, 1.f / 2.4f)) - 0.055f);
+      const auto out = std::lround(s * 255.f);
       return static_cast<uint8_t>(std::clamp(out, 0L, 255L));
     }
   } // namespace
@@ -51,7 +51,7 @@ namespace mr {
     VkDeviceMemory staging_memory = VK_NULL_HANDLE;
     VkDeviceSize staging_size = 0;
 
-    VkExtent2D swapchain_extent{0, 0};
+    VkExtent2D swapchain_extent{.width=0, .height=0};
     std::vector<VkImage> swapchain_images{};
     bool warned_gpu_fallback = false;
 #ifdef TRACY_ENABLE
@@ -82,7 +82,7 @@ namespace mr {
         vkb_swapchain = {};
       }
       swapchain_images.clear();
-      swapchain_extent = {0, 0};
+      swapchain_extent = {.width=0, .height=0};
     }
 
     void shutdown()
@@ -151,7 +151,7 @@ namespace mr {
       }
     }
 
-    uint32_t find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags properties) const
+    [[nodiscard]] uint32_t find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags properties) const
     {
       MR_TRACY_ZONE;
       VkPhysicalDeviceMemoryProperties memory_properties{};
@@ -159,7 +159,7 @@ namespace mr {
       for (uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
         const bool type_supported = (type_filter & (1u << i)) != 0;
         const bool has_properties =
-          (memory_properties.memoryTypes[i].propertyFlags & properties) == properties;
+            (properties & memory_properties.memoryTypes[i].propertyFlags) == properties;
         if (type_supported && has_properties) {
           return i;
         }
@@ -215,8 +215,8 @@ namespace mr {
       swapchain_builder
         .set_desired_extent(width, height)
         .set_desired_format(VkSurfaceFormatKHR{
-          VK_FORMAT_B8G8R8A8_SRGB,
-          VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
+          .format=VK_FORMAT_B8G8R8A8_SRGB,
+          .colorSpace=VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
         })
         .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
         .set_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT);
@@ -443,7 +443,7 @@ namespace mr {
       copy_region.imageSubresource.mipLevel = 0;
       copy_region.imageSubresource.baseArrayLayer = 0;
       copy_region.imageSubresource.layerCount = 1;
-      copy_region.imageExtent = vk::Extent3D{swapchain_extent.width, swapchain_extent.height, 1u};
+      copy_region.imageExtent = vk::Extent3D{.width=swapchain_extent.width, .height=swapchain_extent.height, .depth=1u};
 
       vkCmdCopyBufferToImage(
         command_buffer,

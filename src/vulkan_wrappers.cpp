@@ -3,6 +3,7 @@
 
 #include <VkBootstrap.h>
 #include <libassert/assert.hpp>
+#include <boost/unordered/unordered_flat_map.hpp>
 
 #include <algorithm>
 #include <array>
@@ -56,12 +57,7 @@ namespace mr {
 
     bool has_extension(const std::vector<std::string>& extensions, const char* extension_name)
     {
-      for (const auto& ext : extensions) {
-        if (ext == extension_name) {
-          return true;
-        }
-      }
-      return false;
+      return std::ranges::any_of(extensions, [extension_name](const auto &ext) -> auto { return ext == extension_name; });
     }
 
     bool queue_supports_present(
@@ -253,11 +249,11 @@ namespace mr {
       if (path.empty()) {
         return false;
       }
-      std::error_code ec{};
+      std::error_code error{};
       const auto parent = std::filesystem::path(path).parent_path();
       if (!parent.empty()) {
-        std::filesystem::create_directories(parent, ec);
-        if (ec) {
+        std::filesystem::create_directories(parent, error);
+        if (error) {
           return false;
         }
       }
@@ -326,7 +322,7 @@ namespace mr {
   }
 
   VulkanContext::VulkanContext(VulkanContext&& other) noexcept
-    : instance(std::move(other.instance))
+    : instance(other.instance)
     , physical_device(std::move(other.physical_device))
     , device(std::move(other.device))
     , allocator(other.allocator)
@@ -376,7 +372,7 @@ namespace mr {
       instance = {};
     }
 
-    instance = std::move(other.instance);
+    instance = other.instance;
     physical_device = std::move(other.physical_device);
     device = std::move(other.device);
     allocator = other.allocator;
@@ -413,7 +409,7 @@ namespace mr {
   }
   vk::PipelineCache VulkanContext::vk_pipeline_cache() const { return pipeline_cache; }
 
-  void VulkanContext::flush_pipeline_cache()
+  void VulkanContext::flush_pipeline_cache() const
   {
     if (!pipeline_cache || pipeline_cache_path.empty() || device.device == VK_NULL_HANDLE) {
       return;
@@ -435,7 +431,7 @@ namespace mr {
     }
 
     VulkanContext context{};
-    context.instance = std::move(*instance_result);
+    context.instance = *instance_result;
 
     vkb::PhysicalDeviceSelector selector(context.instance, create_info.surface);
     selector.require_present(create_info.require_present);
@@ -514,6 +510,7 @@ namespace mr {
     }
 
     std::vector<vkb::CustomQueueDescription> queue_setup{};
+    queue_setup.reserve(unique_families.size());
     for (const uint32_t family : unique_families) {
       queue_setup.emplace_back(family, std::vector<float>{1.0f});
     }
@@ -572,7 +569,7 @@ namespace mr {
       return std::unexpected(instance_ret.error());
     }
 
-    vkb::Instance instance = std::move(*instance_ret);
+    vkb::Instance instance = *instance_ret;
 
     uint32_t device_count = 0;
     VkResult count_result =
@@ -731,7 +728,7 @@ namespace mr {
       const VkResult result = vmaMapMemory(context_->allocator, allocation_, &mapped_data_);
       ASSERT(result == VK_SUCCESS, "vmaMapMemory failed", static_cast<int>(result));
     }
-    return std::span(reinterpret_cast<const std::byte*>(mapped_data_), static_cast<size_t>(size_));
+    return {reinterpret_cast<const std::byte*>(mapped_data_), static_cast<size_t>(size_)};
   }
 
   std::vector<std::byte> HostBuffer::copy() noexcept
@@ -774,8 +771,8 @@ namespace mr {
       vk::MemoryPropertyFlagBits::eDeviceLocal);
     copy_buffer(
       command_buffer,
-      BufferRegion{context_, buffer_, 0, std::min(size_, new_size)},
-      BufferRegion{context_, resized.buffer_, 0, std::min(size_, new_size)});
+      BufferRegion{.context=context_, .buffer=buffer_, .offset=0, .size=std::min(size_, new_size)},
+      BufferRegion{.context=context_, .buffer=resized.buffer_, .offset=0, .size=std::min(size_, new_size)});
     *this = std::move(resized);
     return *this;
   }
@@ -791,8 +788,8 @@ namespace mr {
 
     copy_buffer(
       command_buffer,
-      BufferRegion{context_, staging.buffer(), 0, static_cast<vk::DeviceSize>(src.size())},
-      BufferRegion{context_, buffer_, offset, static_cast<vk::DeviceSize>(src.size())});
+      BufferRegion{.context=context_, .buffer=staging.buffer(), .offset=0, .size=static_cast<vk::DeviceSize>(src.size())},
+      BufferRegion{.context=context_, .buffer=buffer_, .offset=offset, .size=static_cast<vk::DeviceSize>(src.size())});
     return *this;
   }
 
@@ -837,7 +834,6 @@ namespace mr {
         initial_byte_size,
         usage_flags | vk::BufferUsageFlagBits::eTransferSrc,
         vk::MemoryPropertyFlags{})
-    , current_size_(0)
   {}
 
   vk::DeviceSize VectorBuffer::append_range(vk::CommandBuffer command_buffer, std::span<const std::byte> src) noexcept
@@ -944,8 +940,7 @@ namespace mr {
   }
 
   DeviceHeapAllocator::DeviceHeapAllocator(vk::DeviceSize start_byte_size, uint32_t alignment)
-    : size_(0)
-    , alignment_(alignment)
+    : alignment_(alignment)
   {
     ASSERT(std::has_single_bit(alignment), "allocator alignment must be power-of-two");
     add_block(start_byte_size);
@@ -1109,13 +1104,12 @@ namespace mr {
     vk::ImageAspectFlags aspect_flags,
     vk::MemoryPropertyFlags memory_properties,
     uint32_t mip_levels,
-    bool create_view)
+    bool create_image_view)
     : context_(&context)
     , extent_(extent)
     , size_(static_cast<size_t>(extent.width) * static_cast<size_t>(extent.height) * format_byte_size(format))
     , format_(format)
     , mip_levels_(mip_levels)
-    , layout_(vk::ImageLayout::eUndefined)
     , aspect_flags_(aspect_flags)
   {
     ASSERT(mip_levels > 0, "mip levels must be >= 1");
@@ -1144,7 +1138,7 @@ namespace mr {
       nullptr);
     ASSERT(result == VK_SUCCESS, "vmaCreateImage failed", static_cast<int>(result));
 
-    if (create_view) {
+    if (create_image_view) {
       image_view_ = create_image_view(0, mip_levels_);
       owns_image_view_ = true;
     }
@@ -1314,7 +1308,7 @@ namespace mr {
     region.imageSubresource.mipLevel = mip_levels_ - 1;
     region.imageSubresource.baseArrayLayer = 0;
     region.imageSubresource.layerCount = 1;
-    region.imageOffset = vk::Offset3D{0, 0, 0};
+    region.imageOffset = vk::Offset3D{.x=0, .y=0, .z=0};
     region.imageExtent = extent_;
     command_buffer.copyBufferToImage(staging.buffer(), image_, layout_, region);
   }
@@ -1332,7 +1326,7 @@ namespace mr {
     region.imageSubresource.mipLevel = mip_levels_ - 1;
     region.imageSubresource.baseArrayLayer = 0;
     region.imageSubresource.layerCount = 1;
-    region.imageOffset = vk::Offset3D{0, 0, 0};
+    region.imageOffset = vk::Offset3D{.x=0, .y=0, .z=0};
     region.imageExtent = extent_;
     command_buffer.copyImageToBuffer(image_, layout_, stage_buffer.buffer(), region);
     return stage_buffer;
@@ -1345,10 +1339,10 @@ namespace mr {
     create_info.viewType = vk::ImageViewType::e2D;
     create_info.format = format_;
     create_info.components = {
-      vk::ComponentSwizzle::eIdentity,
-      vk::ComponentSwizzle::eIdentity,
-      vk::ComponentSwizzle::eIdentity,
-      vk::ComponentSwizzle::eIdentity,
+      .r=vk::ComponentSwizzle::eIdentity,
+      .g=vk::ComponentSwizzle::eIdentity,
+      .b=vk::ComponentSwizzle::eIdentity,
+      .a=vk::ComponentSwizzle::eIdentity,
     };
     create_info.subresourceRange.aspectMask = aspect_flags_;
     create_info.subresourceRange.baseMipLevel = mip_level;
@@ -1477,6 +1471,8 @@ namespace mr {
         true)
   {}
 
+  TextureImage::~TextureImage() = default;
+
   DepthImage::DepthImage(const VulkanContext& context, vk::Extent3D extent, uint32_t mip_levels)
     : DeviceImage(
         context,
@@ -1551,7 +1547,7 @@ namespace mr {
   {}
 
   struct FrameRecorder::Impl {
-    enum class ResourceKind {
+    enum class ResourceKind : std::uint8_t {
       Buffer,
       Image,
     };
@@ -1585,16 +1581,16 @@ namespace mr {
       std::vector<ResourceUsage> usages{};
     };
 
-    struct ThreadPools {
+    struct PerThreadCommandPools {
       vk::CommandPool graphics_pool{};
       vk::CommandPool compute_pool{};
     };
 
     struct FrameState {
-      std::vector<ThreadPools> thread_pools{};
-      std::unordered_map<std::thread::id, uint32_t> thread_slots{};
-      std::vector<EnqueuedSubmission> graphics_submissions{};
-      std::vector<EnqueuedSubmission> compute_submissions{};
+      std::vector<PerThreadCommandPools> thread_pools;
+      boost::unordered_flat_map<std::thread::id, uint32_t, std::hash<std::thread::id>> thread_slots;
+      std::vector<EnqueuedSubmission> graphics_submissions;
+      std::vector<EnqueuedSubmission> compute_submissions;
       uint64_t completion_timeline_value = 0;
 #ifdef TRACY_ENABLE
       TracyLockable(std::mutex, mutex);
@@ -1605,12 +1601,12 @@ namespace mr {
 
     const VulkanContext* context = nullptr;
     CreateInfo create_info;
-    std::vector<std::unique_ptr<FrameState>> frames{};
+    std::vector<std::unique_ptr<FrameState>> frames;
     vk::Semaphore timeline_semaphore{};
     uint64_t timeline_counter = 0;
     uint64_t active_frame_number = 0;
-    std::unordered_map<uint64_t, std::vector<ResourceUsage>> pending_usages{};
-    std::unordered_map<uint64_t, ResourceState> resource_states{};
+    boost::unordered_flat_map<uint64_t, std::vector<ResourceUsage>> pending_usages;
+    boost::unordered_flat_map<uint64_t, ResourceState> resource_states;
 #ifdef TRACY_ENABLE
     TracyLockable(std::mutex, resource_mutex);
     TracyVkCtx tracy_graphics_ctx = nullptr;
@@ -1623,10 +1619,12 @@ namespace mr {
     std::mutex resource_mutex{};
 #endif
 
+    Impl(const Impl&) = delete;
+    Impl(Impl&&) = delete;
+    Impl& operator=(const Impl&) = delete;
+    Impl& operator=(Impl&&) = delete;
     Impl(const VulkanContext& in_context, CreateInfo in_create_info)
-      : context(&in_context)
-      , create_info(in_create_info)
-    {
+        : context(&in_context), create_info(in_create_info) {
       if (create_info.frames_in_flight == 0) {
         create_info.frames_in_flight = 1;
       }
@@ -1649,7 +1647,7 @@ namespace mr {
       const auto create_tracy_context = [&](QueueTarget queue_target,
                                           TracyVkCtx& tracy_ctx,
                                           vk::CommandPool& tracy_pool,
-                                          vk::CommandBuffer& tracy_cmd) {
+                                          vk::CommandBuffer& tracy_cmd) -> void {
         vk::CommandPoolCreateInfo pool_info{};
         pool_info.flags = vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
         pool_info.queueFamilyIndex = queue_family_for(queue_target);
@@ -1689,7 +1687,7 @@ namespace mr {
 
     ~Impl()
     {
-      if (!context) {
+      if (context == nullptr) {
         return;
       }
 #ifdef TRACY_ENABLE
@@ -1759,21 +1757,21 @@ namespace mr {
       return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkImage>(image)));
     }
 
-    uint32_t acquire_thread_slot(FrameState& frame_state)
+    uint32_t acquire_thread_slot(FrameState& frame_state) const
     {
       std::lock_guard lock(frame_state.mutex);
       const std::thread::id tid = std::this_thread::get_id();
       if (const auto it = frame_state.thread_slots.find(tid); it != frame_state.thread_slots.end()) {
         return it->second;
       }
-      const uint32_t slot = static_cast<uint32_t>(frame_state.thread_slots.size() % create_info.max_recording_threads);
+      const auto slot = static_cast<uint32_t>(frame_state.thread_slots.size() % create_info.max_recording_threads);
       frame_state.thread_slots[tid] = slot;
       return slot;
     }
 
-    vk::CommandPool& command_pool_for(FrameState& frame_state, uint32_t thread_slot, QueueTarget queue_target)
+    vk::CommandPool& command_pool_for(FrameState& frame_state, uint32_t thread_slot, QueueTarget queue_target) const
     {
-      ThreadPools& pools = frame_state.thread_pools[thread_slot];
+      PerThreadCommandPools& pools = frame_state.thread_pools[thread_slot];
       vk::CommandPool& selected_pool =
         queue_target == QueueTarget::Graphics ? pools.graphics_pool : pools.compute_pool;
       if (selected_pool) {
@@ -2339,7 +2337,7 @@ namespace mr {
 
   GraphicsPipeline::~GraphicsPipeline()
   {
-    if (!context_) {
+    if (context_ == nullptr) {
       return;
     }
     if (pipeline_) {
@@ -2362,10 +2360,10 @@ namespace mr {
     if (this == &other) {
       return *this;
     }
-    if (context_ && pipeline_) {
+    if ((context_ != nullptr) && pipeline_) {
       context_->vk_device().destroyPipeline(pipeline_);
     }
-    if (context_ && layout_) {
+    if ((context_ != nullptr) && layout_) {
       context_->vk_device().destroyPipelineLayout(layout_);
     }
     context_ = other.context_;
@@ -2403,7 +2401,7 @@ namespace mr {
       vk::PipelineShaderStageCreateInfo stage_info{};
       stage_info.stage = stage_desc.stage;
       stage_info.module = stage_desc.module;
-      stage_info.pName = stage_desc.entry_point ? stage_desc.entry_point : "main";
+      stage_info.pName = (stage_desc.entry_point != nullptr) ? stage_desc.entry_point : "main";
       shader_stages.push_back(stage_info);
     }
 

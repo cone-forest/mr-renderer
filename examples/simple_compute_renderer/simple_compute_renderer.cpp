@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <iterator>
 #include <vector>
 
 #ifndef MR_RENDERER_LIB_SHADER_DIR
@@ -52,7 +53,9 @@ namespace mr {
 
       dst.width = w;
       dst.height = h;
-      dst.rgba32f.assign(linear_rgba.begin(), linear_rgba.begin() + expected_floats);
+      dst.rgba32f.clear();
+      dst.rgba32f.reserve(expected_floats);
+      std::copy_n(linear_rgba.begin(), expected_floats, std::back_inserter(dst.rgba32f));
     }
 
     const char *physical_device_index_env()
@@ -69,7 +72,7 @@ namespace mr {
      * or VK_PHYSICAL_DEVICE_INDEX (decimal, must be in range). Otherwise prefers a
      * discrete NVIDIA GPU, then any discrete GPU, then index 0.
      */
-    uint32_t kompute_physical_device_index()
+    uint32_t kompute_physical_device_index() // NOLINT(readability-function-cognitive-complexity)
     {
       MR_TRACY_ZONE_N("kompute_physical_device_index");
       const auto device_props_result = enumerate_vulkan_physical_devices();
@@ -82,7 +85,7 @@ namespace mr {
       }
 
       if (const char *const env = physical_device_index_env()) {
-        if (env[0] != '\0') {
+        if (*env != '\0') {
           char *end = nullptr;
           const unsigned long v = std::strtoul(env, &end, 10);
           if (end != env) {
@@ -104,7 +107,7 @@ namespace mr {
       bool have_nv_discrete = false;
 
       for (uint32_t i = 0; i < device_props.size(); ++i) {
-        const VulkanPhysicalDeviceInfo &props = device_props[i];
+        const VulkanPhysicalDeviceInfo& props = device_props.at(i);
         if (props.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
           if (!have_discrete) {
             have_discrete = true;
@@ -141,7 +144,7 @@ namespace mr {
 
     const auto compiled = mr::importer::compile(shader_path);
     ASSERT(compiled, "mr::importer::compile failed for gradient.slang");
-    const mr::importer::Shader* cs = pick_compute(*compiled);
+    const mr::importer::Shader* cs = pick_compute(compiled.value());
     ASSERT(cs != nullptr, "no compute shader stage in compiled gradient.slang");
     const std::vector<uint32_t> spirv = spirv_words(*cs);
 

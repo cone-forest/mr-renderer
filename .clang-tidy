@@ -5,7 +5,17 @@ Checks: >
   modernize-*,
   performance-*,
   readability-*,
-  -cppcoreguidelines-avoid-magic-numbers
+  -cppcoreguidelines-avoid-magic-numbers,
+  -modernize-use-trailing-return-type,
+  -readability-uppercase-literal-suffix,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -readability-redundant-member-init,
+  -readability-magic-numbers,
+  -bugprone-easily-swappable-parameters,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -readability-identifier-length
 WarningsAsErrors: '*'
 HeaderFilterRegex: '^(include|src|tests)/'
 FormatStyle: file

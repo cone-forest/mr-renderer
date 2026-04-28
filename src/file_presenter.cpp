@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <libassert/assert.hpp>
 #include <sstream>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -19,8 +20,8 @@ namespace mr {
       MR_TRACY_ZONE;
       x = std::clamp(x, 0.f, 1.f);
       const float s =
-        x <= 0.0031308f ? (12.92f * x) : (1.055f * std::pow(x, 1.f / 2.4f) - 0.055f);
-      const auto out = static_cast<long>(std::lround(s * 255.f));
+        x <= 0.0031308f ? (12.92f * x) : ((1.055f * std::pow(x, 1.f / 2.4f)) - 0.055f);
+      const auto out = std::lround(s * 255.f);
       return static_cast<uint8_t>(std::clamp(out, 0L, 255L));
     }
   } // namespace
@@ -48,18 +49,19 @@ namespace mr {
     const int w = static_cast<int>(cpu_frame.width);
     const int h = static_cast<int>(cpu_frame.height);
     const size_t count = static_cast<size_t>(w) * static_cast<size_t>(h);
-    const auto* px = cpu_frame.rgba32f.data();
+    const std::span<const float> px{cpu_frame.rgba32f};
 
     std::vector<uint8_t> rgba8(count * 4u);
     for (size_t i = 0; i < count; ++i) {
-      const float r = px[i * 4u + 0u];
-      const float g = px[i * 4u + 1u];
-      const float b = px[i * 4u + 2u];
-      const float a = px[i * 4u + 3u];
-      rgba8[i * 4u + 0u] = linear_to_srgb_u8(r);
-      rgba8[i * 4u + 1u] = linear_to_srgb_u8(g);
-      rgba8[i * 4u + 2u] = linear_to_srgb_u8(b);
-      rgba8[i * 4u + 3u] = linear_to_srgb_u8(a);
+      const size_t base = i * 4u;
+      const float r = px.at(base + 0u);
+      const float g = px.at(base + 1u);
+      const float b = px.at(base + 2u);
+      const float a = px.at(base + 3u);
+      rgba8.at(base + 0u) = linear_to_srgb_u8(r);
+      rgba8.at(base + 1u) = linear_to_srgb_u8(g);
+      rgba8.at(base + 2u) = linear_to_srgb_u8(b);
+      rgba8.at(base + 3u) = linear_to_srgb_u8(a);
     }
 
     std::ostringstream name;

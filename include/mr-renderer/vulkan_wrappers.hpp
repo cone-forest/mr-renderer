@@ -59,9 +59,9 @@ namespace mr {
     vk::Queue present_queue{};
 
     VulkanFeatureSupport feature_support{};
-    std::vector<std::string> enabled_extensions{};
+    std::vector<std::string> enabled_extensions;
     vk::PipelineCache pipeline_cache{};
-    std::string pipeline_cache_path{};
+    std::string pipeline_cache_path;
 
     VulkanContext() = default;
     ~VulkanContext();
@@ -76,7 +76,7 @@ namespace mr {
     [[nodiscard]] vk::Device vk_device() const;
     [[nodiscard]] bool has_present_queue() const;
     [[nodiscard]] vk::PipelineCache vk_pipeline_cache() const;
-    void flush_pipeline_cache();
+    void flush_pipeline_cache() const;
   };
 
   [[nodiscard]] std::expected<VulkanContext, std::string>
@@ -90,7 +90,7 @@ namespace mr {
   std::expected<std::vector<VulkanPhysicalDeviceInfo>, std::string>
   enumerate_vulkan_physical_devices();
 
-  enum class QueueTarget {
+  enum class QueueTarget : std::uint8_t {
     Graphics,
     ComputeTransfer,
   };
@@ -154,7 +154,7 @@ namespace mr {
 
   private:
     struct Impl;
-    std::unique_ptr<Impl> impl_{};
+    std::unique_ptr<Impl> impl_;
   };
 
   struct BufferRegion {
@@ -233,6 +233,7 @@ namespace mr {
     DeviceBuffer& operator=(const DeviceBuffer&) = delete;
     DeviceBuffer(DeviceBuffer&&) noexcept = default;
     DeviceBuffer& operator=(DeviceBuffer&&) noexcept = default;
+    ~DeviceBuffer() noexcept override = default;
 
     DeviceBuffer& resize(vk::CommandBuffer command_buffer, vk::DeviceSize new_size) noexcept;
     DeviceBuffer& write(
@@ -337,6 +338,7 @@ namespace mr {
     DeviceHeapAllocator& operator=(const DeviceHeapAllocator&) = delete;
     DeviceHeapAllocator(DeviceHeapAllocator&& other) noexcept;
     DeviceHeapAllocator& operator=(DeviceHeapAllocator&& other) noexcept;
+    ~DeviceHeapAllocator() noexcept = default;
 
     AllocationInfo allocate(vk::DeviceSize size) noexcept;
     void deallocate(vk::DeviceSize offset) noexcept;
@@ -349,10 +351,10 @@ namespace mr {
 
     vk::DeviceSize size_ = 0;
     uint32_t alignment_ = 16;
-    std::unordered_map<vk::DeviceSize, Allocation> allocations_{};
-    std::mutex allocations_mutex_{};
-    std::mutex add_block_mutex_{};
-    std::vector<AllocationBlock> blocks_{};
+    std::unordered_map<vk::DeviceSize, Allocation> allocations_;
+    std::mutex allocations_mutex_;
+    std::mutex add_block_mutex_;
+    std::vector<AllocationBlock> blocks_;
   };
 
   class HeapBuffer {
@@ -390,8 +392,8 @@ namespace mr {
     [[nodiscard]] vk::Buffer buffer() const noexcept { return buffer_.buffer(); }
 
   private:
-    VectorBuffer buffer_{};
-    DeviceHeapAllocator heap_{};
+    VectorBuffer buffer_;
+    DeviceHeapAllocator heap_;
   };
 
   class VertexHeapBuffer : public HeapBuffer {
@@ -545,6 +547,10 @@ namespace mr {
       vk::Format format,
       vk::Image image,
       vk::ImageView view = {});
+    SwapchainImage(const SwapchainImage&) noexcept = delete;
+    SwapchainImage& operator=(const SwapchainImage&) noexcept = delete;
+    SwapchainImage(SwapchainImage&&) noexcept = default;
+    SwapchainImage& operator=(SwapchainImage&&) noexcept = default;
     ~SwapchainImage() override;
   };
 
@@ -556,12 +562,17 @@ namespace mr {
       vk::Format format,
       vk::ImageUsageFlags usage_flags = {},
       uint32_t mip_levels = 1);
+    TextureImage(const TextureImage&) noexcept = delete;
+    TextureImage& operator=(const TextureImage&) noexcept = delete;
+    TextureImage(TextureImage&&) noexcept = default;
+    TextureImage& operator=(TextureImage&&) noexcept = default;
+    ~TextureImage() override;
   };
 
   class DepthImage : public DeviceImage {
   public:
     explicit DepthImage(const VulkanContext& context, vk::Extent3D extent, uint32_t mip_levels = 1);
-    vk::RenderingAttachmentInfo attachment_info() const;
+    [[nodiscard]] vk::RenderingAttachmentInfo attachment_info() const;
   };
 
   class ColorAttachmentImage : public DeviceImage {
@@ -571,7 +582,7 @@ namespace mr {
       vk::Extent3D extent,
       vk::Format format,
       uint32_t mip_levels = 1);
-    vk::RenderingAttachmentInfo attachment_info() const;
+    [[nodiscard]] vk::RenderingAttachmentInfo attachment_info() const;
   };
 
   class StorageImage : public DeviceImage {
@@ -674,7 +685,7 @@ namespace mr {
     [[nodiscard]] GraphicsPipelineDesc& desc() noexcept { return desc_; }
     [[nodiscard]] const GraphicsPipelineDesc& desc() const noexcept { return desc_; }
 
-    std::expected<GraphicsPipeline, std::string> build() const;
+    [[nodiscard]] std::expected<GraphicsPipeline, std::string> build() const;
 
   private:
     const VulkanContext* context_ = nullptr;

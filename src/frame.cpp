@@ -90,7 +90,7 @@ namespace mr {
     copy_region.imageSubresource.mipLevel = 0;
     copy_region.imageSubresource.baseArrayLayer = 0;
     copy_region.imageSubresource.layerCount = 1;
-    copy_region.imageExtent = vk::Extent3D{gpu_frame.width, gpu_frame.height, 1u};
+    copy_region.imageExtent = vk::Extent3D{.width=gpu_frame.width, .height=gpu_frame.height, .depth=1u};
     cmd.copyImageToBuffer(
       gpu_frame.image,
       vk::ImageLayout::eTransferSrcOptimal,

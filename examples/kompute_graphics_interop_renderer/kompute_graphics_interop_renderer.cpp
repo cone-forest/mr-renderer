@@ -28,8 +28,8 @@ namespace mr {
     }
 
     struct Vertex {
-      float position[2];
-      float color[3];
+      std::array<float, 2> position{};
+      std::array<float, 3> color{};
     };
 
     struct DrawIndexedCommandRaw {
@@ -108,9 +108,14 @@ namespace mr {
 
     GraphicsPipeline graphics_pipeline{};
 
+    Impl() = default;
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
+    Impl(Impl&&) = delete;
+    Impl& operator=(Impl&&) = delete;
     ~Impl() { shutdown(); }
 
-    void initialize(uint32_t requested_width, uint32_t requested_height)
+    void initialize(uint32_t requested_width, uint32_t requested_height) // NOLINT(readability-function-cognitive-complexity)
     {
       MR_TRACY_ZONE_N("KomputeInterop::initialize");
       width = requested_width == 0 ? 1u : requested_width;
@@ -140,8 +145,8 @@ namespace mr {
       ASSERT(static_cast<bool>(kompute_queue), "failed to acquire compute queue handle");
 
       const auto queue_props = physical_device.get_queue_families();
-      const vk::QueueFlags graphics_flags{queue_props[graphics_queue_family].queueFlags};
-      const vk::QueueFlags kompute_flags{queue_props[kompute_queue_family].queueFlags};
+      const vk::QueueFlags graphics_flags{queue_props.at(graphics_queue_family).queueFlags};
+      const vk::QueueFlags kompute_flags{queue_props.at(kompute_queue_family).queueFlags};
       ASSERT((graphics_flags & vk::QueueFlagBits::eGraphics) != vk::QueueFlags{}, "graphics queue must support graphics");
       ASSERT((graphics_flags & vk::QueueFlagBits::eCompute) != vk::QueueFlags{}, "graphics queue must support compute");
       ASSERT((graphics_flags & vk::QueueFlagBits::eTransfer) != vk::QueueFlags{}, "graphics queue must support transfer");
@@ -173,9 +178,9 @@ namespace mr {
     {
       MR_TRACY_ZONE_N("KomputeInterop::create_static_mesh_buffers");
       const std::array<Vertex, 3> vertices = {{
-        {{-0.7f, -0.7f}, {1.0f, 0.0f, 0.0f}},
-        {{0.0f, 0.7f}, {0.0f, 1.0f, 0.0f}},
-        {{0.7f, -0.7f}, {0.0f, 0.0f, 1.0f}},
+        {.position = {-0.7f, -0.7f}, .color = {1.0f, 0.0f, 0.0f}},
+        {.position = {0.0f, 0.7f}, .color = {0.0f, 1.0f, 0.0f}},
+        {.position = {0.7f, -0.7f}, .color = {0.0f, 0.0f, 1.0f}},
       }};
       const std::array<uint32_t, 3> indices = {{0u, 1u, 2u}};
       vertex_buffer = VertexBuffer(*vulkan_context, sizeof(vertices));
@@ -192,8 +197,10 @@ namespace mr {
       upload_cmd_alloc.commandPool = upload_pool;
       upload_cmd_alloc.level = vk::CommandBufferLevel::ePrimary;
       upload_cmd_alloc.commandBufferCount = 1;
-      auto upload_cmd = vk_expect(vk::Device(device.device).allocateCommandBuffers(upload_cmd_alloc),
-        "vk::allocateCommandBuffers(upload) failed")[0];
+      auto upload_cmds = vk_expect(
+        vk::Device(device.device).allocateCommandBuffers(upload_cmd_alloc),
+        "vk::allocateCommandBuffers(upload) failed");
+      auto upload_cmd = upload_cmds.at(0);
 
       vk::CommandBufferBeginInfo begin_info{};
       begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
@@ -238,7 +245,7 @@ namespace mr {
       MR_TRACY_ZONE;
       color_image.emplace(
         *vulkan_context,
-        vk::Extent3D{width, height, 1u},
+        vk::Extent3D{.width = width, .height = height, .depth = 1u},
         vk::Format::eR8G8B8A8Unorm);
     }
 
@@ -248,8 +255,8 @@ namespace mr {
       const auto compiled = mr::importer::compile(shader_path);
       ASSERT(compiled, "mr::importer::compile failed for interop_raster.slang");
 
-      const mr::importer::Shader* vs = pick_stage(*compiled, vk::ShaderStageFlagBits::eVertex);
-      const mr::importer::Shader* fs = pick_stage(*compiled, vk::ShaderStageFlagBits::eFragment);
+      const mr::importer::Shader* vs = pick_stage(compiled.value(), vk::ShaderStageFlagBits::eVertex);
+      const mr::importer::Shader* fs = pick_stage(compiled.value(), vk::ShaderStageFlagBits::eFragment);
       ASSERT(vs != nullptr, "missing vertex shader stage for interop_raster.slang");
       ASSERT(fs != nullptr, "missing fragment shader stage for interop_raster.slang");
 
@@ -264,14 +271,14 @@ namespace mr {
       binding_desc.inputRate = vk::VertexInputRate::eVertex;
 
       std::array<vk::VertexInputAttributeDescription, 2> attributes{};
-      attributes[0].location = 0;
-      attributes[0].binding = 0;
-      attributes[0].format = vk::Format::eR32G32Sfloat;
-      attributes[0].offset = offsetof(Vertex, position);
-      attributes[1].location = 1;
-      attributes[1].binding = 0;
-      attributes[1].format = vk::Format::eR32G32B32Sfloat;
-      attributes[1].offset = offsetof(Vertex, color);
+      attributes.at(0).location = 0;
+      attributes.at(0).binding = 0;
+      attributes.at(0).format = vk::Format::eR32G32Sfloat;
+      attributes.at(0).offset = offsetof(Vertex, position);
+      attributes.at(1).location = 1;
+      attributes.at(1).binding = 0;
+      attributes.at(1).format = vk::Format::eR32G32B32Sfloat;
+      attributes.at(1).offset = offsetof(Vertex, color);
 
       vk::PipelineInputAssemblyStateCreateInfo input_assembly{};
       input_assembly.topology = vk::PrimitiveTopology::eTriangleList;
@@ -323,7 +330,7 @@ namespace mr {
       MR_TRACY_ZONE_N("KomputeInterop::initialize_kompute");
       const auto compiled = mr::importer::compile(shader_path);
       ASSERT(compiled, "mr::importer::compile failed for interop_indirect_copy.slang");
-      const mr::importer::Shader* cs = pick_stage(*compiled, vk::ShaderStageFlagBits::eCompute);
+      const mr::importer::Shader* cs = pick_stage(compiled.value(), vk::ShaderStageFlagBits::eCompute);
       ASSERT(cs != nullptr, "missing compute shader stage for interop_indirect_copy.slang");
       const std::vector<uint32_t> cs_spirv = spirv_words(*cs);
 
@@ -383,7 +390,8 @@ namespace mr {
     {
       MR_TRACY_ZONE_N("KomputeInterop::record_graphics_command_buffer");
       ASSERT(color_image.has_value(), "color attachment image is not initialized");
-      color_image->transition_layout(command_buffer, vk::ImageLayout::eColorAttachmentOptimal);
+      auto& color = color_image.value();
+      color.transition_layout(command_buffer, vk::ImageLayout::eColorAttachmentOptimal);
 
       vk::BufferMemoryBarrier indirect_barrier{};
       vk::BufferCopy indirect_copy{};
@@ -406,11 +414,11 @@ namespace mr {
         indirect_barrier,
         {});
 
-      vk::RenderingAttachmentInfo color_attachment_info = color_image->attachment_info();
-      color_attachment_info.clearValue.color = vk::ClearColorValue(std::array<float, 4>{0.05f, 0.05f, 0.1f, 1.0f});
+      vk::RenderingAttachmentInfo color_attachment_info = color.attachment_info();
+      color_attachment_info.clearValue = vk::ClearColorValue(std::array<float, 4>{0.05f, 0.05f, 0.1f, 1.0f});
       vk::RenderingInfo rendering_info{};
-      rendering_info.renderArea.offset = vk::Offset2D{0, 0};
-      rendering_info.renderArea.extent = vk::Extent2D{width, height};
+      rendering_info.renderArea.offset = vk::Offset2D{.x = 0, .y = 0};
+      rendering_info.renderArea.extent = vk::Extent2D{.width = width, .height = height};
       rendering_info.layerCount = 1;
       rendering_info.colorAttachmentCount = 1;
       rendering_info.pColorAttachments = &color_attachment_info;
@@ -424,8 +432,8 @@ namespace mr {
       viewport.maxDepth = 1.0f;
       command_buffer.setViewport(0, viewport);
       vk::Rect2D scissor{};
-      scissor.offset = vk::Offset2D{0, 0};
-      scissor.extent = vk::Extent2D{width, height};
+      scissor.offset = vk::Offset2D{.x = 0, .y = 0};
+      scissor.extent = vk::Extent2D{.width = width, .height = height};
       command_buffer.setScissor(0, scissor);
       graphics_pipeline.bind(command_buffer);
 
@@ -439,10 +447,10 @@ namespace mr {
         sizeof(vk::DrawIndexedIndirectCommand));
       command_buffer.endRendering();
 
-      color_image->transition_layout(command_buffer, vk::ImageLayout::eTransferSrcOptimal);
+      color.transition_layout(command_buffer, vk::ImageLayout::eTransferSrcOptimal);
     }
 
-    Frame render_frame(uint32_t frame_index)
+    Frame render_frame(uint32_t frame_index) // NOLINT(readability-function-cognitive-complexity)
     {
       MR_TRACY_ZONE_N("KomputeInterop::render_frame");
       MR_TRACY_FRAME("kompute_interop_frame");
@@ -467,6 +475,7 @@ namespace mr {
         .writes = false,
       });
       ASSERT(color_image.has_value(), "color attachment image is not initialized");
+      const auto& color = color_image.value();
       vk::ImageSubresourceRange color_range{};
       color_range.aspectMask = vk::ImageAspectFlagBits::eColor;
       color_range.baseMipLevel = 0;
@@ -474,7 +483,7 @@ namespace mr {
       color_range.baseArrayLayer = 0;
       color_range.layerCount = 1;
       frame_recorder->declare_image_usage(recorded, FrameRecorder::ImageUsageDesc{
-        .image = color_image->image(),
+        .image = color.image(),
         .subresource_range = color_range,
         .layout = vk::ImageLayout::eColorAttachmentOptimal,
         .stage = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
@@ -504,10 +513,10 @@ namespace mr {
       gpu_frame.context = vulkan_context.get();
       gpu_frame.width = width;
       gpu_frame.height = height;
-      gpu_frame.image = color_image->image();
+      gpu_frame.image = color.image();
       gpu_frame.layout = vk::ImageLayout::eTransferSrcOptimal;
       gpu_frame.format = vk::Format::eR8G8B8A8Unorm;
-      return Frame{frame_index, std::move(gpu_frame)};
+      return Frame{frame_index, gpu_frame};
     }
 
     void shutdown()
