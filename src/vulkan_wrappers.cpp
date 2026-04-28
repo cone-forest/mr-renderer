@@ -1747,6 +1747,10 @@ namespace mr {
     std::lock_guard lock(frame_state.mutex);
     frame_state.graphics_submissions.clear();
     frame_state.compute_submissions.clear();
+    {
+      std::lock_guard usage_lock(impl_->resource_mutex);
+      impl_->pending_usages.clear();
+    }
     for (auto& pools : frame_state.thread_pools) {
       if (pools.graphics_pool) {
         const auto reset_result = impl_->context->vk_device().resetCommandPool(
@@ -1907,21 +1911,32 @@ namespace mr {
       return impl_->timeline_counter;
     }
 
-    uint64_t final_timeline_value = impl_->timeline_counter;
-    const auto submit_one_queue =
-      [&](QueueTarget queue_target, const std::vector<Impl::EnqueuedSubmission>& submissions) -> std::expected<void, std::string> {
-      if (submissions.empty()) {
-        return {};
-      }
+    constexpr size_t queue_count = 2;
+    const auto queue_index = [](QueueTarget q) -> size_t {
+      return q == QueueTarget::Graphics ? 0u : 1u;
+    };
+    const auto queue_from_index = [](size_t i) -> QueueTarget {
+      return i == 0 ? QueueTarget::Graphics : QueueTarget::ComputeTransfer;
+    };
 
-      std::vector<vk::CommandBufferSubmitInfo> command_infos{};
-      command_infos.reserve(submissions.size() * 2);
-      std::vector<vk::CommandBuffer> barrier_command_buffers{};
-      for (const auto& submission : submissions) {
-        std::vector<vk::BufferMemoryBarrier2> buffer_barriers{};
-        std::vector<vk::ImageMemoryBarrier2> image_barriers{};
-        buffer_barriers.reserve(submission.usages.size());
-        image_barriers.reserve(submission.usages.size());
+    std::array<std::vector<Impl::EnqueuedSubmission>, queue_count> submissions_by_queue{};
+    submissions_by_queue[queue_index(QueueTarget::Graphics)] = std::move(graphics_submissions);
+    submissions_by_queue[queue_index(QueueTarget::ComputeTransfer)] = std::move(compute_submissions);
+
+    std::array<std::vector<vk::BufferMemoryBarrier2>, queue_count> acquire_buffer_barriers{};
+    std::array<std::vector<vk::ImageMemoryBarrier2>, queue_count> acquire_image_barriers{};
+    std::array<std::vector<vk::BufferMemoryBarrier2>, queue_count> release_buffer_barriers{};
+    std::array<std::vector<vk::ImageMemoryBarrier2>, queue_count> release_image_barriers{};
+    std::array<bool, queue_count> queue_wait_from_other{false, false};
+    std::array<bool, queue_count> queue_has_work{false, false};
+
+    for (size_t queue_i = 0; queue_i < queue_count; ++queue_i) {
+      queue_has_work[queue_i] = !submissions_by_queue[queue_i].empty();
+      for (const auto& submission : submissions_by_queue[queue_i]) {
+        std::vector<vk::BufferMemoryBarrier2> same_queue_buffer_barriers{};
+        std::vector<vk::ImageMemoryBarrier2> same_queue_image_barriers{};
+        same_queue_buffer_barriers.reserve(submission.usages.size());
+        same_queue_image_barriers.reserve(submission.usages.size());
 
         {
           std::lock_guard state_lock(impl_->resource_mutex);
@@ -1930,6 +1945,8 @@ namespace mr {
             const bool has_prev = prev_it != impl_->resource_states.end();
             const bool same_queue_family =
               has_prev && prev_it->second.queue_family == submission.command_buffer.queue_family;
+            const bool different_queue_family =
+              has_prev && prev_it->second.queue_family != submission.command_buffer.queue_family;
 
             if (has_prev && same_queue_family && (prev_it->second.writes || usage.writes)) {
               if (usage.kind == Impl::ResourceKind::Buffer) {
@@ -1943,7 +1960,7 @@ namespace mr {
                 barrier.buffer = usage.buffer;
                 barrier.offset = usage.offset;
                 barrier.size = usage.size;
-                buffer_barriers.push_back(barrier);
+                same_queue_buffer_barriers.push_back(barrier);
               } else {
                 vk::ImageMemoryBarrier2 barrier{};
                 barrier.srcStageMask = prev_it->second.stage;
@@ -1956,7 +1973,64 @@ namespace mr {
                 barrier.dstQueueFamilyIndex = submission.command_buffer.queue_family;
                 barrier.image = usage.image;
                 barrier.subresourceRange = usage.subresource_range;
-                image_barriers.push_back(barrier);
+                same_queue_image_barriers.push_back(barrier);
+              }
+            } else if (has_prev && different_queue_family) {
+              const size_t producer_queue_i = queue_index(prev_it->second.queue_target);
+              const size_t consumer_queue_i = queue_index(submission.command_buffer.queue_target);
+              queue_wait_from_other[consumer_queue_i] = true;
+              queue_has_work[producer_queue_i] = true;
+
+              if (usage.kind == Impl::ResourceKind::Buffer) {
+                vk::BufferMemoryBarrier2 release_barrier{};
+                release_barrier.srcStageMask = prev_it->second.stage;
+                release_barrier.srcAccessMask = prev_it->second.access;
+                release_barrier.dstStageMask = usage.stage;
+                release_barrier.dstAccessMask = {};
+                release_barrier.srcQueueFamilyIndex = prev_it->second.queue_family;
+                release_barrier.dstQueueFamilyIndex = submission.command_buffer.queue_family;
+                release_barrier.buffer = usage.buffer;
+                release_barrier.offset = usage.offset;
+                release_barrier.size = usage.size;
+                release_buffer_barriers[producer_queue_i].push_back(release_barrier);
+
+                vk::BufferMemoryBarrier2 acquire_barrier{};
+                acquire_barrier.srcStageMask = prev_it->second.stage;
+                acquire_barrier.srcAccessMask = {};
+                acquire_barrier.dstStageMask = usage.stage;
+                acquire_barrier.dstAccessMask = usage.access;
+                acquire_barrier.srcQueueFamilyIndex = prev_it->second.queue_family;
+                acquire_barrier.dstQueueFamilyIndex = submission.command_buffer.queue_family;
+                acquire_barrier.buffer = usage.buffer;
+                acquire_barrier.offset = usage.offset;
+                acquire_barrier.size = usage.size;
+                acquire_buffer_barriers[consumer_queue_i].push_back(acquire_barrier);
+              } else {
+                vk::ImageMemoryBarrier2 release_barrier{};
+                release_barrier.srcStageMask = prev_it->second.stage;
+                release_barrier.srcAccessMask = prev_it->second.access;
+                release_barrier.dstStageMask = usage.stage;
+                release_barrier.dstAccessMask = {};
+                release_barrier.oldLayout = prev_it->second.layout;
+                release_barrier.newLayout = usage.layout;
+                release_barrier.srcQueueFamilyIndex = prev_it->second.queue_family;
+                release_barrier.dstQueueFamilyIndex = submission.command_buffer.queue_family;
+                release_barrier.image = usage.image;
+                release_barrier.subresourceRange = usage.subresource_range;
+                release_image_barriers[producer_queue_i].push_back(release_barrier);
+
+                vk::ImageMemoryBarrier2 acquire_barrier{};
+                acquire_barrier.srcStageMask = prev_it->second.stage;
+                acquire_barrier.srcAccessMask = {};
+                acquire_barrier.dstStageMask = usage.stage;
+                acquire_barrier.dstAccessMask = usage.access;
+                acquire_barrier.oldLayout = prev_it->second.layout;
+                acquire_barrier.newLayout = usage.layout;
+                acquire_barrier.srcQueueFamilyIndex = prev_it->second.queue_family;
+                acquire_barrier.dstQueueFamilyIndex = submission.command_buffer.queue_family;
+                acquire_barrier.image = usage.image;
+                acquire_barrier.subresourceRange = usage.subresource_range;
+                acquire_image_barriers[consumer_queue_i].push_back(acquire_barrier);
               }
             }
 
@@ -1972,8 +2046,9 @@ namespace mr {
           }
         }
 
-        if (!buffer_barriers.empty() || !image_barriers.empty()) {
+        if (!same_queue_buffer_barriers.empty() || !same_queue_image_barriers.empty()) {
           const uint32_t thread_slot = impl_->acquire_thread_slot(frame_state);
+          const QueueTarget queue_target = submission.command_buffer.queue_target;
           vk::CommandPool& command_pool = impl_->command_pool_for(frame_state, thread_slot, queue_target);
           vk::CommandBufferAllocateInfo alloc_info{};
           alloc_info.commandPool = command_pool;
@@ -1981,34 +2056,130 @@ namespace mr {
           alloc_info.commandBufferCount = 1;
           const auto barrier_cmd_rv = impl_->context->vk_device().allocateCommandBuffers(alloc_info);
           if (barrier_cmd_rv.result != vk::Result::eSuccess) {
-            return std::unexpected("FrameRecorder failed to allocate barrier command buffer");
+            return std::unexpected("FrameRecorder failed to allocate same-queue barrier command buffer");
           }
           vk::CommandBuffer barrier_cmd = barrier_cmd_rv.value[0];
-
           vk::CommandBufferBeginInfo begin_info{};
           begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
           if (barrier_cmd.begin(begin_info) != vk::Result::eSuccess) {
-            return std::unexpected("FrameRecorder failed to begin barrier command buffer");
+            return std::unexpected("FrameRecorder failed to begin same-queue barrier command buffer");
           }
           vk::DependencyInfo dependency_info{};
-          dependency_info.bufferMemoryBarrierCount = static_cast<uint32_t>(buffer_barriers.size());
-          dependency_info.pBufferMemoryBarriers = buffer_barriers.data();
-          dependency_info.imageMemoryBarrierCount = static_cast<uint32_t>(image_barriers.size());
-          dependency_info.pImageMemoryBarriers = image_barriers.data();
+          dependency_info.bufferMemoryBarrierCount = static_cast<uint32_t>(same_queue_buffer_barriers.size());
+          dependency_info.pBufferMemoryBarriers = same_queue_buffer_barriers.data();
+          dependency_info.imageMemoryBarrierCount = static_cast<uint32_t>(same_queue_image_barriers.size());
+          dependency_info.pImageMemoryBarriers = same_queue_image_barriers.data();
           barrier_cmd.pipelineBarrier2(dependency_info);
           if (barrier_cmd.end() != vk::Result::eSuccess) {
-            return std::unexpected("FrameRecorder failed to end barrier command buffer");
+            return std::unexpected("FrameRecorder failed to end same-queue barrier command buffer");
           }
-          barrier_command_buffers.push_back(barrier_cmd);
-
-          vk::CommandBufferSubmitInfo barrier_cmd_info{};
-          barrier_cmd_info.commandBuffer = barrier_cmd;
-          command_infos.push_back(barrier_cmd_info);
+          Impl::EnqueuedSubmission barrier_submission{};
+          barrier_submission.command_buffer = {
+            .handle = barrier_cmd,
+            .queue_target = submission.command_buffer.queue_target,
+            .queue_family = submission.command_buffer.queue_family,
+          };
+          submissions_by_queue[queue_i].insert(
+            submissions_by_queue[queue_i].begin(),
+            std::move(barrier_submission));
         }
+      }
+    }
 
+    if (queue_wait_from_other[queue_index(QueueTarget::Graphics)] &&
+      queue_wait_from_other[queue_index(QueueTarget::ComputeTransfer)]) {
+      return std::unexpected("FrameRecorder detected cyclic cross-queue dependencies in a single frame");
+    }
+
+    const auto record_queue_barriers = [&](QueueTarget queue_target,
+                                       const std::vector<vk::BufferMemoryBarrier2>& buffer_barriers,
+                                       const std::vector<vk::ImageMemoryBarrier2>& image_barriers)
+      -> std::expected<vk::CommandBuffer, std::string> {
+      if (buffer_barriers.empty() && image_barriers.empty()) {
+        return vk::CommandBuffer{};
+      }
+      const uint32_t thread_slot = impl_->acquire_thread_slot(frame_state);
+      vk::CommandPool& command_pool = impl_->command_pool_for(frame_state, thread_slot, queue_target);
+      vk::CommandBufferAllocateInfo alloc_info{};
+      alloc_info.commandPool = command_pool;
+      alloc_info.level = vk::CommandBufferLevel::ePrimary;
+      alloc_info.commandBufferCount = 1;
+      const auto cmd_rv = impl_->context->vk_device().allocateCommandBuffers(alloc_info);
+      if (cmd_rv.result != vk::Result::eSuccess) {
+        return std::unexpected("FrameRecorder failed to allocate cross-queue barrier command buffer");
+      }
+      vk::CommandBuffer cmd = cmd_rv.value[0];
+      vk::CommandBufferBeginInfo begin_info{};
+      begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+      if (cmd.begin(begin_info) != vk::Result::eSuccess) {
+        return std::unexpected("FrameRecorder failed to begin cross-queue barrier command buffer");
+      }
+      vk::DependencyInfo dependency_info{};
+      dependency_info.bufferMemoryBarrierCount = static_cast<uint32_t>(buffer_barriers.size());
+      dependency_info.pBufferMemoryBarriers = buffer_barriers.data();
+      dependency_info.imageMemoryBarrierCount = static_cast<uint32_t>(image_barriers.size());
+      dependency_info.pImageMemoryBarriers = image_barriers.data();
+      cmd.pipelineBarrier2(dependency_info);
+      if (cmd.end() != vk::Result::eSuccess) {
+        return std::unexpected("FrameRecorder failed to end cross-queue barrier command buffer");
+      }
+      return cmd;
+    };
+
+    for (size_t queue_i = 0; queue_i < queue_count; ++queue_i) {
+      const QueueTarget target = queue_from_index(queue_i);
+      if (auto barrier_cmd = record_queue_barriers(target, acquire_buffer_barriers[queue_i], acquire_image_barriers[queue_i]);
+        barrier_cmd.has_value() && barrier_cmd.value()) {
+        Impl::EnqueuedSubmission acquire_submission{};
+        acquire_submission.command_buffer = {
+          .handle = barrier_cmd.value(),
+          .queue_target = target,
+          .queue_family = impl_->queue_family_for(target),
+        };
+        submissions_by_queue[queue_i].insert(submissions_by_queue[queue_i].begin(), std::move(acquire_submission));
+        queue_has_work[queue_i] = true;
+      } else if (!barrier_cmd.has_value()) {
+        return std::unexpected(barrier_cmd.error());
+      }
+
+      if (auto barrier_cmd = record_queue_barriers(target, release_buffer_barriers[queue_i], release_image_barriers[queue_i]);
+        barrier_cmd.has_value() && barrier_cmd.value()) {
+        Impl::EnqueuedSubmission release_submission{};
+        release_submission.command_buffer = {
+          .handle = barrier_cmd.value(),
+          .queue_target = target,
+          .queue_family = impl_->queue_family_for(target),
+        };
+        submissions_by_queue[queue_i].push_back(std::move(release_submission));
+        queue_has_work[queue_i] = true;
+      } else if (!barrier_cmd.has_value()) {
+        return std::unexpected(barrier_cmd.error());
+      }
+    }
+
+    std::array<uint64_t, queue_count> queue_signal_values{0, 0};
+    uint64_t final_timeline_value = impl_->timeline_counter;
+    const auto submit_queue = [&](QueueTarget queue_target) -> std::expected<void, std::string> {
+      const size_t idx = queue_index(queue_target);
+      if (!queue_has_work[idx] || submissions_by_queue[idx].empty()) {
+        return {};
+      }
+      std::vector<vk::CommandBufferSubmitInfo> command_infos{};
+      command_infos.reserve(submissions_by_queue[idx].size());
+      for (const auto& submission : submissions_by_queue[idx]) {
         vk::CommandBufferSubmitInfo cmd_info{};
         cmd_info.commandBuffer = submission.command_buffer.handle;
         command_infos.push_back(cmd_info);
+      }
+
+      std::vector<vk::SemaphoreSubmitInfo> wait_infos{};
+      const size_t other_idx = idx == 0 ? 1 : 0;
+      if (queue_wait_from_other[idx] && queue_signal_values[other_idx] > 0) {
+        vk::SemaphoreSubmitInfo wait_info{};
+        wait_info.semaphore = impl_->timeline_semaphore;
+        wait_info.value = queue_signal_values[other_idx];
+        wait_info.stageMask = vk::PipelineStageFlagBits2::eAllCommands;
+        wait_infos.push_back(wait_info);
       }
 
       const uint64_t signal_value = ++impl_->timeline_counter;
@@ -2019,26 +2190,35 @@ namespace mr {
       signal_info.deviceIndex = 0;
 
       vk::SubmitInfo2 submit_info{};
+      submit_info.waitSemaphoreInfoCount = static_cast<uint32_t>(wait_infos.size());
+      submit_info.pWaitSemaphoreInfos = wait_infos.data();
       submit_info.commandBufferInfoCount = static_cast<uint32_t>(command_infos.size());
       submit_info.pCommandBufferInfos = command_infos.data();
       submit_info.signalSemaphoreInfoCount = 1;
       submit_info.pSignalSemaphoreInfos = &signal_info;
-
       const auto submit_result = impl_->queue_for(queue_target).submit2(submit_info, vk::Fence{});
       if (submit_result != vk::Result::eSuccess) {
         return std::unexpected("FrameRecorder queue submit2 failed");
       }
+      queue_signal_values[idx] = signal_value;
       final_timeline_value = signal_value;
       return {};
     };
 
-    if (const auto submit_result = submit_one_queue(QueueTarget::ComputeTransfer, compute_submissions);
-      !submit_result.has_value()) {
-      return std::unexpected(submit_result.error());
-    }
-    if (const auto submit_result = submit_one_queue(QueueTarget::Graphics, graphics_submissions);
-      !submit_result.has_value()) {
-      return std::unexpected(submit_result.error());
+    if (queue_wait_from_other[queue_index(QueueTarget::ComputeTransfer)]) {
+      if (const auto submit_result = submit_queue(QueueTarget::Graphics); !submit_result.has_value()) {
+        return std::unexpected(submit_result.error());
+      }
+      if (const auto submit_result = submit_queue(QueueTarget::ComputeTransfer); !submit_result.has_value()) {
+        return std::unexpected(submit_result.error());
+      }
+    } else {
+      if (const auto submit_result = submit_queue(QueueTarget::ComputeTransfer); !submit_result.has_value()) {
+        return std::unexpected(submit_result.error());
+      }
+      if (const auto submit_result = submit_queue(QueueTarget::Graphics); !submit_result.has_value()) {
+        return std::unexpected(submit_result.error());
+      }
     }
 
     frame_state.completion_timeline_value = final_timeline_value;
