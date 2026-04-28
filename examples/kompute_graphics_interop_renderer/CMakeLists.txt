@@ -13,3 +13,17 @@ target_compile_definitions(
     "MR_RENDERER_LIB_SHADER_DIR=\"${PROJECT_SOURCE_DIR}/shaders\""
 )
 mr_apply_exception_flags(example-kompute-graphics-interop-renderer)
+
+add_executable(kompute_graphics_interop_renderer main.cpp)
+target_link_libraries(
+  kompute_graphics_interop_renderer
+  PRIVATE
+    mr-renderer-lib
+    example-kompute-graphics-interop-renderer
+)
+target_include_directories(
+  kompute_graphics_interop_renderer
+  PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}
+)
+mr_apply_exception_flags(kompute_graphics_interop_renderer)
