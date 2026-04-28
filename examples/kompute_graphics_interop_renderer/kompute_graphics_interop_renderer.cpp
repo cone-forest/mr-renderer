@@ -94,12 +94,7 @@ namespace mr {
     std::shared_ptr<kp::TensorT<uint32_t>> destination_indirect_tensor{};
     std::shared_ptr<kp::Algorithm> compute_algorithm{};
     std::shared_ptr<kp::Sequence> compute_sequence{};
-
-    vk::Semaphore compute_dispatch_done{};
-    vk::Fence graphics_fence{};
-
-    vk::CommandPool graphics_command_pool{};
-    vk::CommandBuffer graphics_command_buffer{};
+    std::unique_ptr<FrameRecorder> frame_recorder{};
 
     vk::Buffer indirect_destination_buffer{};
     VertexBuffer vertex_buffer{};
@@ -161,37 +156,11 @@ namespace mr {
 
       const std::filesystem::path shader_dir = std::filesystem::path(MR_RENDERER_LIB_SHADER_DIR);
 
-      create_sync_objects();
-      create_command_pools();
+      frame_recorder = std::make_unique<FrameRecorder>(*vulkan_context);
       create_static_mesh_buffers();
       create_render_target();
       create_graphics_pipeline(shader_dir / "interop_raster.slang");
       initialize_kompute(shader_dir / "interop_indirect_copy.slang");
-      record_graphics_command_buffer();
-    }
-
-    void create_sync_objects()
-    {
-      vk::SemaphoreCreateInfo sem_info{};
-      compute_dispatch_done = vk_expect(vk::Device(device.device).createSemaphore(sem_info), "vk::createSemaphore failed");
-
-      vk::FenceCreateInfo fence_info{};
-      graphics_fence = vk_expect(vk::Device(device.device).createFence(fence_info), "vk::createFence failed");
-    }
-
-    void create_command_pools()
-    {
-      vk::CommandPoolCreateInfo graphics_pool_info{};
-      graphics_pool_info.flags = vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
-      graphics_pool_info.queueFamilyIndex = graphics_queue_family;
-      graphics_command_pool = vk_expect(vk::Device(device.device).createCommandPool(graphics_pool_info), "vk::createCommandPool failed");
-
-      vk::CommandBufferAllocateInfo cmd_alloc{};
-      cmd_alloc.commandBufferCount = 1;
-      cmd_alloc.level = vk::CommandBufferLevel::ePrimary;
-
-      cmd_alloc.commandPool = graphics_command_pool;
-      graphics_command_buffer = vk_expect(vk::Device(device.device).allocateCommandBuffers(cmd_alloc), "vk::allocateCommandBuffers failed")[0];
     }
 
     void create_static_mesh_buffers()
@@ -373,17 +342,10 @@ namespace mr {
       ASSERT(static_cast<bool>(indirect_destination_buffer), "Kompute destination indirect buffer is null");
     }
 
-    void record_graphics_command_buffer()
+    void record_graphics_command_buffer(vk::CommandBuffer command_buffer)
     {
-      ASSERT(graphics_command_buffer.reset(vk::CommandBufferResetFlags{}) == vk::Result::eSuccess,
-        "vk::CommandBuffer::reset(graphics) failed");
-
-      vk::CommandBufferBeginInfo begin_info{};
-      ASSERT(graphics_command_buffer.begin(begin_info) == vk::Result::eSuccess,
-        "vk::CommandBuffer::begin(graphics) failed");
-
       ASSERT(color_image.has_value(), "color attachment image is not initialized");
-      color_image->transition_layout(graphics_command_buffer, vk::ImageLayout::eColorAttachmentOptimal);
+      color_image->transition_layout(command_buffer, vk::ImageLayout::eColorAttachmentOptimal);
 
       vk::BufferMemoryBarrier indirect_barrier{};
       indirect_barrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
@@ -393,7 +355,7 @@ namespace mr {
       indirect_barrier.buffer = indirect_destination_buffer;
       indirect_barrier.offset = 0;
       indirect_barrier.size = sizeof(DrawIndexedCommandRaw);
-      graphics_command_buffer.pipelineBarrier(
+      command_buffer.pipelineBarrier(
         vk::PipelineStageFlagBits::eComputeShader,
         vk::PipelineStageFlagBits::eDrawIndirect,
         vk::DependencyFlags{},
@@ -409,22 +371,20 @@ namespace mr {
       rendering_info.layerCount = 1;
       rendering_info.colorAttachmentCount = 1;
       rendering_info.pColorAttachments = &color_attachment_info;
-      graphics_command_buffer.beginRendering(rendering_info);
-      graphics_pipeline.bind(graphics_command_buffer);
+      command_buffer.beginRendering(rendering_info);
+      graphics_pipeline.bind(command_buffer);
 
       vk::DeviceSize vb_offset = 0;
-      graphics_command_buffer.bindVertexBuffers(0, vertex_buffer.buffer(), vb_offset);
-      graphics_command_buffer.bindIndexBuffer(index_buffer.buffer(), 0, index_buffer.index_type());
-      graphics_command_buffer.drawIndexedIndirect(
+      command_buffer.bindVertexBuffers(0, vertex_buffer.buffer(), vb_offset);
+      command_buffer.bindIndexBuffer(index_buffer.buffer(), 0, index_buffer.index_type());
+      command_buffer.drawIndexedIndirect(
         indirect_destination_buffer,
         0,
         1,
         sizeof(vk::DrawIndexedIndirectCommand));
-      graphics_command_buffer.endRendering();
+      command_buffer.endRendering();
 
-      color_image->transition_layout(graphics_command_buffer, vk::ImageLayout::eTransferSrcOptimal);
-      ASSERT(graphics_command_buffer.end() == vk::Result::eSuccess,
-        "vk::CommandBuffer::end(graphics) failed");
+      color_image->transition_layout(command_buffer, vk::ImageLayout::eTransferSrcOptimal);
     }
 
     Frame render_frame(uint32_t frame_index)
@@ -432,25 +392,56 @@ namespace mr {
       if (compute_sequence->isRunning()) {
         compute_sequence->evalAwait();
       }
+      compute_sequence->eval();
 
-      compute_sequence->evalAsync(
-        std::vector<vk::Semaphore>{},
-        std::vector<vk::PipelineStageFlags>{},
-        std::vector<vk::Semaphore>{compute_dispatch_done});
+      ASSERT(frame_recorder != nullptr, "frame recorder is not initialized");
+      auto begin_frame_result = frame_recorder->begin_frame(frame_index);
+      ASSERT(begin_frame_result.has_value(), "FrameRecorder::begin_frame failed", begin_frame_result.error());
 
-      ASSERT(vk::Device(device.device).resetFences(graphics_fence) == vk::Result::eSuccess,
-        "vk::Device::resetFences failed");
-      vk::PipelineStageFlags graphics_wait_stage = vk::PipelineStageFlagBits::eDrawIndirect;
-      vk::SubmitInfo graphics_submit{};
-      graphics_submit.waitSemaphoreCount = 1;
-      graphics_submit.pWaitSemaphores = &compute_dispatch_done;
-      graphics_submit.pWaitDstStageMask = &graphics_wait_stage;
-      graphics_submit.commandBufferCount = 1;
-      graphics_submit.pCommandBuffers = &graphics_command_buffer;
-      ASSERT(graphics_queue.submit(graphics_submit, graphics_fence) == vk::Result::eSuccess,
-        "vk::Queue::submit(graphics) failed");
-      ASSERT(vk::Device(device.device).waitForFences(graphics_fence, true, UINT64_MAX) == vk::Result::eSuccess,
-        "vk::Device::waitForFences failed");
+      auto record_result = frame_recorder->begin_recording(QueueTarget::Graphics);
+      ASSERT(record_result.has_value(), "FrameRecorder::begin_recording failed", record_result.error());
+      auto recorded = *record_result;
+      frame_recorder->declare_buffer_usage(recorded, FrameRecorder::BufferUsageDesc{
+        .buffer = indirect_destination_buffer,
+        .offset = 0,
+        .size = sizeof(DrawIndexedCommandRaw),
+        .stage = vk::PipelineStageFlagBits2::eDrawIndirect,
+        .access = vk::AccessFlagBits2::eIndirectCommandRead,
+        .writes = false,
+      });
+      ASSERT(color_image.has_value(), "color attachment image is not initialized");
+      vk::ImageSubresourceRange color_range{};
+      color_range.aspectMask = vk::ImageAspectFlagBits::eColor;
+      color_range.baseMipLevel = 0;
+      color_range.levelCount = 1;
+      color_range.baseArrayLayer = 0;
+      color_range.layerCount = 1;
+      frame_recorder->declare_image_usage(recorded, FrameRecorder::ImageUsageDesc{
+        .image = color_image->image(),
+        .subresource_range = color_range,
+        .layout = vk::ImageLayout::eColorAttachmentOptimal,
+        .stage = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+        .access = vk::AccessFlagBits2::eColorAttachmentWrite,
+        .writes = true,
+      });
+
+      record_graphics_command_buffer(recorded.handle);
+      auto end_result = frame_recorder->end_recording(recorded);
+      ASSERT(end_result.has_value(), "FrameRecorder::end_recording failed", end_result.error());
+      frame_recorder->enqueue_for_submit(recorded);
+
+      auto submit_result = frame_recorder->submit_frame();
+      ASSERT(submit_result.has_value(), "FrameRecorder::submit_frame failed", submit_result.error());
+      const uint64_t completion_value = *submit_result;
+      if (completion_value > 0) {
+        vk::SemaphoreWaitInfo wait_info{};
+        const vk::Semaphore timeline = frame_recorder->timeline_semaphore();
+        wait_info.semaphoreCount = 1;
+        wait_info.pSemaphores = &timeline;
+        wait_info.pValues = &completion_value;
+        ASSERT(vk::Device(device.device).waitSemaphores(wait_info, UINT64_MAX) == vk::Result::eSuccess,
+          "waitSemaphores(frame recorder completion) failed");
+      }
       ASSERT(color_image.has_value(), "color attachment image is not initialized");
       GpuFrame gpu_frame{};
       gpu_frame.context = vulkan_context.get();
@@ -479,24 +470,13 @@ namespace mr {
       kp_device.reset();
       kp_physical_device.reset();
       kp_instance.reset();
+      frame_recorder.reset();
 
       graphics_pipeline = {};
       color_image.reset();
       index_buffer = {};
       vertex_buffer = {};
       indirect_destination_buffer = nullptr;
-      if (compute_dispatch_done) {
-        vk::Device(device.device).destroySemaphore(compute_dispatch_done);
-        compute_dispatch_done = nullptr;
-      }
-      if (graphics_fence) {
-        vk::Device(device.device).destroyFence(graphics_fence);
-        graphics_fence = nullptr;
-      }
-      if (graphics_command_pool) {
-        vk::Device(device.device).destroyCommandPool(graphics_command_pool);
-        graphics_command_pool = nullptr;
-      }
 
       device = {};
       physical_device = {};
