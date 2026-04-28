@@ -17,6 +17,7 @@
 
 #define VMA_IMPLEMENTATION
 #include <vk_mem_alloc.h>
+#include <tracy/TracyVulkan.hpp>
 
 namespace mr {
   namespace {
@@ -34,6 +35,7 @@ namespace mr {
       bool headless,
       const std::vector<const char*>& required_extensions)
     {
+      MR_TRACY_ZONE_N("create_instance");
       vkb::InstanceBuilder builder;
       builder.set_app_name(app_name)
         .set_headless(headless)
@@ -78,6 +80,7 @@ namespace mr {
 
     VulkanFeatureSupport query_feature_support(vkb::PhysicalDevice& physical_device)
     {
+      MR_TRACY_ZONE_N("query_feature_support");
       VulkanFeatureSupport support{};
 
       const auto available_extensions = physical_device.get_available_extensions();
@@ -129,6 +132,7 @@ namespace mr {
 
     void enable_optional_features(vkb::PhysicalDevice& physical_device, const VulkanFeatureSupport& support)
     {
+      MR_TRACY_ZONE_N("enable_optional_features");
       if (support.draw_indirect_count) {
         static_cast<void>(physical_device.enable_extension_if_present(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME));
       }
@@ -424,6 +428,7 @@ namespace mr {
 
   std::expected<VulkanContext, std::string> create_vulkan_context(const VulkanContextCreateInfo& create_info)
   {
+    MR_TRACY_ZONE_N("create_vulkan_context");
     auto instance_result = create_instance(create_info.app_name, create_info.headless, {});
     if (!instance_result.has_value()) {
       return std::unexpected(instance_result.error());
@@ -1591,7 +1596,11 @@ namespace mr {
       std::vector<EnqueuedSubmission> graphics_submissions{};
       std::vector<EnqueuedSubmission> compute_submissions{};
       uint64_t completion_timeline_value = 0;
+#ifdef TRACY_ENABLE
+      TracyLockable(std::mutex, mutex);
+#else
       std::mutex mutex{};
+#endif
     };
 
     const VulkanContext* context = nullptr;
@@ -1602,7 +1611,17 @@ namespace mr {
     uint64_t active_frame_number = 0;
     std::unordered_map<uint64_t, std::vector<ResourceUsage>> pending_usages{};
     std::unordered_map<uint64_t, ResourceState> resource_states{};
+#ifdef TRACY_ENABLE
+    TracyLockable(std::mutex, resource_mutex);
+    TracyVkCtx tracy_graphics_ctx = nullptr;
+    TracyVkCtx tracy_compute_ctx = nullptr;
+    vk::CommandPool tracy_graphics_pool{};
+    vk::CommandPool tracy_compute_pool{};
+    vk::CommandBuffer tracy_graphics_cmd{};
+    vk::CommandBuffer tracy_compute_cmd{};
+#else
     std::mutex resource_mutex{};
+#endif
 
     Impl(const VulkanContext& in_context, CreateInfo in_create_info)
       : context(&in_context)
@@ -1626,6 +1645,40 @@ namespace mr {
       ASSERT(semaphore_rv.result == vk::Result::eSuccess, "FrameRecorder failed to create timeline semaphore");
       timeline_semaphore = semaphore_rv.value;
 
+#ifdef TRACY_ENABLE
+      const auto create_tracy_context = [&](QueueTarget queue_target,
+                                          TracyVkCtx& tracy_ctx,
+                                          vk::CommandPool& tracy_pool,
+                                          vk::CommandBuffer& tracy_cmd) {
+        vk::CommandPoolCreateInfo pool_info{};
+        pool_info.flags = vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
+        pool_info.queueFamilyIndex = queue_family_for(queue_target);
+        const auto pool_rv = context->vk_device().createCommandPool(pool_info);
+        ASSERT(pool_rv.result == vk::Result::eSuccess, "FrameRecorder failed to create Tracy command pool");
+        tracy_pool = pool_rv.value;
+
+        vk::CommandBufferAllocateInfo alloc_info{};
+        alloc_info.commandPool = tracy_pool;
+        alloc_info.level = vk::CommandBufferLevel::ePrimary;
+        alloc_info.commandBufferCount = 1;
+        const auto cmd_rv = context->vk_device().allocateCommandBuffers(alloc_info);
+        ASSERT(cmd_rv.result == vk::Result::eSuccess, "FrameRecorder failed to allocate Tracy command buffer");
+        tracy_cmd = cmd_rv.value[0];
+
+        tracy_ctx = TracyVkContext(
+          static_cast<VkPhysicalDevice>(context->vk_physical_device()),
+          static_cast<VkDevice>(context->vk_device()),
+          static_cast<VkQueue>(queue_for(queue_target)),
+          static_cast<VkCommandBuffer>(tracy_cmd));
+      };
+      create_tracy_context(QueueTarget::Graphics, tracy_graphics_ctx, tracy_graphics_pool, tracy_graphics_cmd);
+      create_tracy_context(
+        QueueTarget::ComputeTransfer,
+        tracy_compute_ctx,
+        tracy_compute_pool,
+        tracy_compute_cmd);
+#endif
+
       frames.reserve(create_info.frames_in_flight);
       for (uint32_t i = 0; i < create_info.frames_in_flight; ++i) {
         auto frame = std::make_unique<FrameState>();
@@ -1639,6 +1692,30 @@ namespace mr {
       if (!context) {
         return;
       }
+#ifdef TRACY_ENABLE
+      if (tracy_graphics_ctx != nullptr) {
+        TracyVkDestroy(tracy_graphics_ctx);
+        tracy_graphics_ctx = nullptr;
+      }
+      if (tracy_compute_ctx != nullptr) {
+        TracyVkDestroy(tracy_compute_ctx);
+        tracy_compute_ctx = nullptr;
+      }
+      if (tracy_graphics_pool && tracy_graphics_cmd) {
+        context->vk_device().freeCommandBuffers(tracy_graphics_pool, tracy_graphics_cmd);
+      }
+      if (tracy_compute_pool && tracy_compute_cmd) {
+        context->vk_device().freeCommandBuffers(tracy_compute_pool, tracy_compute_cmd);
+      }
+      if (tracy_graphics_pool) {
+        context->vk_device().destroyCommandPool(tracy_graphics_pool);
+        tracy_graphics_pool = nullptr;
+      }
+      if (tracy_compute_pool) {
+        context->vk_device().destroyCommandPool(tracy_compute_pool);
+        tracy_compute_pool = nullptr;
+      }
+#endif
       for (auto& frame : frames) {
         for (auto& pools : frame->thread_pools) {
           if (pools.graphics_pool) {
@@ -1714,11 +1791,15 @@ namespace mr {
 
   FrameRecorder::FrameRecorder(const VulkanContext& context)
     : FrameRecorder(context, CreateInfo{})
-  {}
+  {
+    MR_TRACY_ZONE;
+  }
 
   FrameRecorder::FrameRecorder(const VulkanContext& context, CreateInfo create_info)
     : impl_(std::make_unique<Impl>(context, create_info))
-  {}
+  {
+    MR_TRACY_ZONE;
+  }
 
   FrameRecorder::~FrameRecorder() = default;
   FrameRecorder::FrameRecorder(FrameRecorder&&) noexcept = default;
@@ -1726,6 +1807,7 @@ namespace mr {
 
   std::expected<void, std::string> FrameRecorder::begin_frame(uint64_t frame_index)
   {
+    MR_TRACY_ZONE_N("FrameRecorder::begin_frame");
     if (!impl_) {
       return std::unexpected("FrameRecorder is not initialized");
     }
@@ -1776,6 +1858,7 @@ namespace mr {
     QueueTarget queue_target,
     vk::CommandBufferUsageFlags usage_flags)
   {
+    MR_TRACY_ZONE_N("FrameRecorder::begin_recording");
     if (!impl_) {
       return std::unexpected("FrameRecorder is not initialized");
     }
@@ -1809,6 +1892,7 @@ namespace mr {
   std::expected<void, std::string>
   FrameRecorder::end_recording(const RecordedCommandBuffer& command_buffer)
   {
+    MR_TRACY_ZONE_N("FrameRecorder::end_recording");
     if (!impl_) {
       return std::unexpected("FrameRecorder is not initialized");
     }
@@ -1825,6 +1909,7 @@ namespace mr {
     const RecordedCommandBuffer& command_buffer,
     const BufferUsageDesc& usage_desc)
   {
+    MR_TRACY_ZONE;
     ASSERT(impl_ != nullptr, "FrameRecorder is not initialized");
     ASSERT(command_buffer.handle, "FrameRecorder::declare_buffer_usage requires a valid command buffer");
     ASSERT(usage_desc.buffer, "FrameRecorder::declare_buffer_usage requires a valid buffer");
@@ -1847,6 +1932,7 @@ namespace mr {
     const RecordedCommandBuffer& command_buffer,
     const ImageUsageDesc& usage_desc)
   {
+    MR_TRACY_ZONE;
     ASSERT(impl_ != nullptr, "FrameRecorder is not initialized");
     ASSERT(command_buffer.handle, "FrameRecorder::declare_image_usage requires a valid command buffer");
     ASSERT(usage_desc.image, "FrameRecorder::declare_image_usage requires a valid image");
@@ -1867,6 +1953,7 @@ namespace mr {
 
   void FrameRecorder::enqueue_for_submit(const RecordedCommandBuffer& command_buffer)
   {
+    MR_TRACY_ZONE_N("FrameRecorder::enqueue_for_submit");
     ASSERT(impl_ != nullptr, "FrameRecorder is not initialized");
     FrameRecorder::Impl::FrameState& frame_state =
       *impl_->frames[impl_->active_frame_number % impl_->create_info.frames_in_flight];
@@ -1893,6 +1980,7 @@ namespace mr {
 
   std::expected<uint64_t, std::string> FrameRecorder::submit_frame()
   {
+    MR_TRACY_ZONE_N("FrameRecorder::submit_frame");
     if (!impl_) {
       return std::unexpected("FrameRecorder is not initialized");
     }
@@ -2199,6 +2287,13 @@ namespace mr {
       if (submit_result != vk::Result::eSuccess) {
         return std::unexpected("FrameRecorder queue submit2 failed");
       }
+#ifdef TRACY_ENABLE
+      if (queue_target == QueueTarget::Graphics && impl_->tracy_graphics_ctx != nullptr) {
+        TracyVkCollect(impl_->tracy_graphics_ctx, static_cast<VkCommandBuffer>(impl_->tracy_graphics_cmd));
+      } else if (queue_target == QueueTarget::ComputeTransfer && impl_->tracy_compute_ctx != nullptr) {
+        TracyVkCollect(impl_->tracy_compute_ctx, static_cast<VkCommandBuffer>(impl_->tracy_compute_cmd));
+      }
+#endif
       queue_signal_values[idx] = signal_value;
       final_timeline_value = signal_value;
       return {};
@@ -2226,6 +2321,7 @@ namespace mr {
 
   uint64_t FrameRecorder::last_timeline_value() const noexcept
   {
+    MR_TRACY_ZONE;
     if (!impl_) {
       return 0;
     }
@@ -2234,6 +2330,7 @@ namespace mr {
 
   vk::Semaphore FrameRecorder::timeline_semaphore() const noexcept
   {
+    MR_TRACY_ZONE;
     if (!impl_) {
       return vk::Semaphore{};
     }

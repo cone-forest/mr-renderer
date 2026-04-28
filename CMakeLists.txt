@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 4.0)
 
 project(mr-renderer-lib)
+option(MR_RENDERER_ENABLE_TRACY "Enable Tracy instrumentation" ON)
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/deps.cmake)
 
@@ -35,6 +36,7 @@ target_compile_definitions(
   PRIVATE
   "MR_RENDERER_LIB_SHADER_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/shaders\""
   $<$<CONFIG:Debug>:MR_RENDERER_ENABLE_VK_VALIDATION=1>
+  $<$<BOOL:${MR_RENDERER_ENABLE_TRACY}>:TRACY_ENABLE>
 )
 
 # dependencies

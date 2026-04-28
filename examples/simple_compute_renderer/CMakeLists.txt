@@ -13,6 +13,7 @@ target_compile_definitions(
     "MR_RENDERER_LIB_SHADER_DIR=\"${PROJECT_SOURCE_DIR}/shaders\""
 )
 mr_apply_exception_flags(example-simple-compute-renderer)
+mr_apply_tracy_flags(example-simple-compute-renderer)
 
 add_executable(simple_compute_renderer main.cpp)
 target_link_libraries(
@@ -27,3 +28,4 @@ target_include_directories(
     ${CMAKE_CURRENT_LIST_DIR}
 )
 mr_apply_exception_flags(simple_compute_renderer)
+mr_apply_tracy_flags(simple_compute_renderer)

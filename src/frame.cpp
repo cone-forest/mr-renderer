@@ -27,6 +27,7 @@ namespace mr {
 
   CpuFrame::CpuFrame(const GpuFrame& gpu_frame)
   {
+    MR_TRACY_ZONE_N("CpuFrame::CpuFrame(GpuFrame)");
     ASSERT(gpu_frame.context != nullptr, "GpuFrame conversion requires a valid VulkanContext");
     ASSERT(gpu_frame.image, "GpuFrame conversion requires a valid vk::Image");
     ASSERT(gpu_frame.width > 0 && gpu_frame.height > 0, "GpuFrame conversion requires non-zero dimensions");
@@ -146,6 +147,7 @@ namespace mr {
 
   GpuFrame::operator CpuFrame() const
   {
+    MR_TRACY_ZONE;
     return CpuFrame(*this);
   }
 
@@ -161,26 +163,31 @@ namespace mr {
 
   bool Frame::is_cpu() const noexcept
   {
+    MR_TRACY_ZONE;
     return std::holds_alternative<CpuFrame>(payload);
   }
 
   bool Frame::is_gpu() const noexcept
   {
+    MR_TRACY_ZONE;
     return std::holds_alternative<GpuFrame>(payload);
   }
 
   const CpuFrame* Frame::cpu() const noexcept
   {
+    MR_TRACY_ZONE;
     return std::get_if<CpuFrame>(&payload);
   }
 
   const GpuFrame* Frame::gpu() const noexcept
   {
+    MR_TRACY_ZONE;
     return std::get_if<GpuFrame>(&payload);
   }
 
   uint32_t Frame::width() const noexcept
   {
+    MR_TRACY_ZONE;
     if (const auto* cpu_frame = cpu()) {
       return cpu_frame->width;
     }
@@ -192,6 +199,7 @@ namespace mr {
 
   uint32_t Frame::height() const noexcept
   {
+    MR_TRACY_ZONE;
     if (const auto* cpu_frame = cpu()) {
       return cpu_frame->height;
     }
@@ -203,6 +211,7 @@ namespace mr {
 
   CpuFrame Frame::to_cpu_frame() const
   {
+    MR_TRACY_ZONE;
     if (const auto* cpu_frame = cpu()) {
       return *cpu_frame;
     }

@@ -20,6 +20,7 @@ namespace mr {
 
     std::vector<uint32_t> spirv_words(const mr::importer::Shader& shader)
     {
+      MR_TRACY_ZONE;
       const size_t nbytes = shader.spirv.size();
       ASSERT(nbytes % 4 == 0, "SPIR-V size is not a multiple of 4");
       std::vector<uint32_t> words(nbytes / 4);
@@ -29,6 +30,7 @@ namespace mr {
 
     const mr::importer::Shader* pick_compute(const std::vector<mr::importer::Shader>& shaders)
     {
+      MR_TRACY_ZONE;
       const auto it = std::ranges::find_if(shaders, [](const mr::importer::Shader& shader) -> bool {
         return shader.stage == vk::ShaderStageFlagBits::eCompute;
       });
@@ -44,6 +46,7 @@ namespace mr {
       uint32_t w,
       uint32_t h)
     {
+      MR_TRACY_ZONE;
       const size_t expected_floats = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
       ASSERT(linear_rgba.size() >= expected_floats, "tensor data smaller than expected RGBA float image");
 
@@ -54,6 +57,7 @@ namespace mr {
 
     const char *physical_device_index_env()
     {
+      MR_TRACY_ZONE;
       if (const char *var = std::getenv("MR_VK_PHYSICAL_DEVICE_INDEX")) {
         return var;
       }
@@ -67,6 +71,7 @@ namespace mr {
      */
     uint32_t kompute_physical_device_index()
     {
+      MR_TRACY_ZONE_N("kompute_physical_device_index");
       const auto device_props_result = enumerate_vulkan_physical_devices();
       ASSERT(device_props_result.has_value(),
         "failed to enumerate Vulkan physical devices: ",
@@ -130,6 +135,7 @@ namespace mr {
 
   coro::generator<Frame> SimpleComputeRenderer::frames()
   {
+    MR_TRACY_ZONE_N("SimpleComputeRenderer::frames");
     const std::filesystem::path shader_path =
       std::filesystem::path(MR_RENDERER_LIB_SHADER_DIR) / "gradient.slang";
 
@@ -173,6 +179,7 @@ namespace mr {
 
     int idx = 0;
     while (true) {
+      MR_TRACY_FRAME("simple_compute_frame");
       seq->eval();
 
       CpuFrame cpu_frame{};

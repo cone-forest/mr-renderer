@@ -42,6 +42,7 @@ namespace mr {
 
     std::vector<uint32_t> spirv_words(const mr::importer::Shader& shader)
     {
+      MR_TRACY_ZONE;
       const size_t nbytes = shader.spirv.size();
       ASSERT(nbytes % 4 == 0, "SPIR-V size is not a multiple of 4");
       std::vector<uint32_t> words(nbytes / 4);
@@ -53,6 +54,7 @@ namespace mr {
       const std::vector<mr::importer::Shader>& shaders,
       vk::ShaderStageFlagBits stage)
     {
+      MR_TRACY_ZONE;
       const auto it = std::ranges::find_if(shaders, [stage](const mr::importer::Shader& shader) -> bool {
         return shader.stage == stage;
       });
@@ -64,6 +66,7 @@ namespace mr {
 
     vk::ShaderModule create_shader_module(const vk::Device device, const std::vector<uint32_t>& spirv)
     {
+      MR_TRACY_ZONE;
       vk::ShaderModuleCreateInfo shader_info{};
       shader_info.codeSize = spirv.size() * sizeof(uint32_t);
       shader_info.pCode = spirv.data();
@@ -109,6 +112,7 @@ namespace mr {
 
     void initialize(uint32_t requested_width, uint32_t requested_height)
     {
+      MR_TRACY_ZONE_N("KomputeInterop::initialize");
       width = requested_width == 0 ? 1u : requested_width;
       height = requested_height == 0 ? 1u : requested_height;
 
@@ -167,6 +171,7 @@ namespace mr {
 
     void create_static_mesh_buffers()
     {
+      MR_TRACY_ZONE_N("KomputeInterop::create_static_mesh_buffers");
       const std::array<Vertex, 3> vertices = {{
         {{-0.7f, -0.7f}, {1.0f, 0.0f, 0.0f}},
         {{0.0f, 0.7f}, {0.0f, 1.0f, 0.0f}},
@@ -230,6 +235,7 @@ namespace mr {
 
     void create_render_target()
     {
+      MR_TRACY_ZONE;
       color_image.emplace(
         *vulkan_context,
         vk::Extent3D{width, height, 1u},
@@ -238,6 +244,7 @@ namespace mr {
 
     void create_graphics_pipeline(const std::filesystem::path& shader_path)
     {
+      MR_TRACY_ZONE_N("KomputeInterop::create_graphics_pipeline");
       const auto compiled = mr::importer::compile(shader_path);
       ASSERT(compiled, "mr::importer::compile failed for interop_raster.slang");
 
@@ -313,6 +320,7 @@ namespace mr {
 
     void initialize_kompute(const std::filesystem::path& shader_path)
     {
+      MR_TRACY_ZONE_N("KomputeInterop::initialize_kompute");
       const auto compiled = mr::importer::compile(shader_path);
       ASSERT(compiled, "mr::importer::compile failed for interop_indirect_copy.slang");
       const mr::importer::Shader* cs = pick_stage(*compiled, vk::ShaderStageFlagBits::eCompute);
@@ -373,6 +381,7 @@ namespace mr {
 
     void record_graphics_command_buffer(vk::CommandBuffer command_buffer)
     {
+      MR_TRACY_ZONE_N("KomputeInterop::record_graphics_command_buffer");
       ASSERT(color_image.has_value(), "color attachment image is not initialized");
       color_image->transition_layout(command_buffer, vk::ImageLayout::eColorAttachmentOptimal);
 
@@ -435,6 +444,8 @@ namespace mr {
 
     Frame render_frame(uint32_t frame_index)
     {
+      MR_TRACY_ZONE_N("KomputeInterop::render_frame");
+      MR_TRACY_FRAME("kompute_interop_frame");
       if (compute_sequence->isRunning()) {
         compute_sequence->evalAwait();
       }
@@ -501,6 +512,7 @@ namespace mr {
 
     void shutdown()
     {
+      MR_TRACY_ZONE_N("KomputeInterop::shutdown");
       if (vulkan_context && device.device != VK_NULL_HANDLE) {
         ASSERT(vk::Device(device.device).waitIdle() == vk::Result::eSuccess, "vk::Device::waitIdle failed");
       }
@@ -535,6 +547,7 @@ namespace mr {
   KomputeGraphicsInteropRenderer::KomputeGraphicsInteropRenderer(uint32_t width, uint32_t height)
     : impl_(std::make_unique<Impl>())
   {
+    MR_TRACY_ZONE;
     impl_->initialize(width, height);
   }
 
@@ -546,6 +559,7 @@ namespace mr {
 
   coro::generator<Frame> KomputeGraphicsInteropRenderer::frames()
   {
+    MR_TRACY_ZONE_N("KomputeInterop::frames");
     uint32_t index = 0;
     while (true) {
       co_yield impl_->render_frame(index++);

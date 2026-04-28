@@ -6,6 +6,7 @@
 #include <vkfw/vkfw.hpp>
 
 #include <VkBootstrap.h>
+#include <tracy/TracyVulkan.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -18,6 +19,7 @@ namespace mr {
   namespace {
     uint8_t linear_to_srgb_u8(float x)
     {
+      MR_TRACY_ZONE;
       x = std::clamp(x, 0.f, 1.f);
       const float s =
         x <= 0.0031308f ? (12.92f * x) : (1.055f * std::pow(x, 1.f / 2.4f) - 0.055f);
@@ -52,9 +54,15 @@ namespace mr {
     VkExtent2D swapchain_extent{0, 0};
     std::vector<VkImage> swapchain_images{};
     bool warned_gpu_fallback = false;
+#ifdef TRACY_ENABLE
+    TracyVkCtx tracy_vk_ctx = nullptr;
+    VkCommandPool tracy_command_pool = VK_NULL_HANDLE;
+    VkCommandBuffer tracy_command_buffer = VK_NULL_HANDLE;
+#endif
 
     void destroy_staging()
     {
+      MR_TRACY_ZONE;
       if (staging_buffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(vkb_device.device, staging_buffer, nullptr);
         staging_buffer = VK_NULL_HANDLE;
@@ -68,6 +76,7 @@ namespace mr {
 
     void destroy_swapchain()
     {
+      MR_TRACY_ZONE;
       if (vkb_swapchain.swapchain != VK_NULL_HANDLE) {
         vkb::destroy_swapchain(vkb_swapchain);
         vkb_swapchain = {};
@@ -78,9 +87,24 @@ namespace mr {
 
     void shutdown()
     {
+      MR_TRACY_ZONE_N("WindowPresenter::Impl::shutdown");
       if (vkb_device.device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(vkb_device.device);
       }
+#ifdef TRACY_ENABLE
+      if (tracy_vk_ctx != nullptr) {
+        TracyVkDestroy(tracy_vk_ctx);
+        tracy_vk_ctx = nullptr;
+      }
+      if (tracy_command_buffer != VK_NULL_HANDLE && tracy_command_pool != VK_NULL_HANDLE) {
+        vkFreeCommandBuffers(vkb_device.device, tracy_command_pool, 1, &tracy_command_buffer);
+        tracy_command_buffer = VK_NULL_HANDLE;
+      }
+      if (tracy_command_pool != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(vkb_device.device, tracy_command_pool, nullptr);
+        tracy_command_pool = VK_NULL_HANDLE;
+      }
+#endif
 
       destroy_staging();
 
@@ -129,6 +153,7 @@ namespace mr {
 
     uint32_t find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags properties) const
     {
+      MR_TRACY_ZONE;
       VkPhysicalDeviceMemoryProperties memory_properties{};
       vkGetPhysicalDeviceMemoryProperties(vkb_physical_device.physical_device, &memory_properties);
       for (uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
@@ -145,6 +170,7 @@ namespace mr {
 
     void ensure_staging_buffer(VkDeviceSize required_size)
     {
+      MR_TRACY_ZONE;
       if (required_size <= staging_size && staging_buffer != VK_NULL_HANDLE) {
         return;
       }
@@ -181,6 +207,7 @@ namespace mr {
 
     void recreate_swapchain(uint32_t width, uint32_t height)
     {
+      MR_TRACY_ZONE_N("WindowPresenter::Impl::recreate_swapchain");
       ASSERT(width > 0 && height > 0, "swapchain dimensions must be non-zero");
 
       vkb::Swapchain old_swapchain = vkb_swapchain;
@@ -217,6 +244,7 @@ namespace mr {
 
     void initialize(const CpuFrame& frame)
     {
+      MR_TRACY_ZONE_N("WindowPresenter::Impl::initialize");
       ASSERT(frame.width > 0 && frame.height > 0, "invalid frame size for window presenter");
       const size_t expected_floats =
         static_cast<size_t>(frame.width) * static_cast<size_t>(frame.height) * 4u;
@@ -313,11 +341,31 @@ namespace mr {
       ASSERT(vkCreateFence(vkb_device.device, &fence_info, nullptr, &in_flight) == VK_SUCCESS,
         "vkCreateFence failed");
 
+#ifdef TRACY_ENABLE
+      VkCommandPoolCreateInfo tracy_pool_info{};
+      tracy_pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+      tracy_pool_info.queueFamilyIndex = queue_family;
+      tracy_pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+      ASSERT(
+        vkCreateCommandPool(vkb_device.device, &tracy_pool_info, nullptr, &tracy_command_pool) == VK_SUCCESS,
+        "vkCreateCommandPool(tracy) failed");
+      VkCommandBufferAllocateInfo tracy_alloc_info{};
+      tracy_alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+      tracy_alloc_info.commandPool = tracy_command_pool;
+      tracy_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+      tracy_alloc_info.commandBufferCount = 1;
+      ASSERT(
+        vkAllocateCommandBuffers(vkb_device.device, &tracy_alloc_info, &tracy_command_buffer) == VK_SUCCESS,
+        "vkAllocateCommandBuffers(tracy) failed");
+      tracy_vk_ctx = TracyVkContext(vkb_physical_device.physical_device, vkb_device.device, queue, tracy_command_buffer);
+#endif
+
       recreate_swapchain(frame.width, frame.height);
     }
 
     void upload_frame_pixels(const CpuFrame& frame)
     {
+      MR_TRACY_ZONE_N("WindowPresenter::Impl::upload_frame_pixels");
       ASSERT(frame.width == swapchain_extent.width,
         "frame width must match swapchain width");
       ASSERT(frame.height == swapchain_extent.height,
@@ -351,6 +399,7 @@ namespace mr {
 
     void submit_copy_and_present(uint32_t image_index)
     {
+      MR_TRACY_ZONE_N("WindowPresenter::Impl::submit_copy_and_present");
       ASSERT(image_index < swapchain_images.size(), "swapchain image index out of range");
       const VkImage image = swapchain_images[image_index];
 
@@ -446,6 +495,11 @@ namespace mr {
 
       ASSERT(vkQueueSubmit(queue, 1, reinterpret_cast<const VkSubmitInfo*>(&submit_info), in_flight) == VK_SUCCESS,
         "vkQueueSubmit failed");
+#ifdef TRACY_ENABLE
+      if (tracy_vk_ctx != nullptr && tracy_command_buffer != VK_NULL_HANDLE) {
+        TracyVkCollect(tracy_vk_ctx, tracy_command_buffer);
+      }
+#endif
 
       vk::PresentInfoKHR present_info{};
       const vk::SwapchainKHR present_swapchain = vkb_swapchain.swapchain;
@@ -471,6 +525,7 @@ namespace mr {
 
   WindowPresenter::~WindowPresenter()
   {
+    MR_TRACY_ZONE;
     if (impl_) {
       impl_->shutdown();
     }
@@ -481,6 +536,8 @@ namespace mr {
 
   void WindowPresenter::present(Frame frame)
   {
+    MR_TRACY_ZONE_N("WindowPresenter::present");
+    MR_TRACY_FRAME("window_present");
     ASSERT(impl_ != nullptr, "WindowPresenter impl is null");
 
     std::optional<CpuFrame> converted_cpu{};

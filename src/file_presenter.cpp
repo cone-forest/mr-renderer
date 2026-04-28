@@ -16,6 +16,7 @@ namespace mr {
   namespace {
     uint8_t linear_to_srgb_u8(float x)
     {
+      MR_TRACY_ZONE;
       x = std::clamp(x, 0.f, 1.f);
       const float s =
         x <= 0.0031308f ? (12.92f * x) : (1.055f * std::pow(x, 1.f / 2.4f) - 0.055f);
@@ -30,6 +31,8 @@ namespace mr {
 
   void FilePresenter::present(Frame frame)
   {
+    MR_TRACY_ZONE_N("FilePresenter::present");
+    MR_TRACY_FRAME("file_present");
     if (frame.is_gpu() && !warned_gpu_fallback_) {
       warned_gpu_fallback_ = true;
       static_cast<void>(std::fprintf(

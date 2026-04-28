@@ -12,5 +12,11 @@ function(mr_apply_exception_flags target_name)
   endif()
 endfunction()
 
+function(mr_apply_tracy_flags target_name)
+  if(MR_RENDERER_ENABLE_TRACY)
+    target_compile_definitions(${target_name} PRIVATE TRACY_ENABLE)
+  endif()
+endfunction()
+
 add_subdirectory(simple_compute_renderer)
 add_subdirectory(kompute_graphics_interop_renderer)
