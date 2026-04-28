@@ -74,13 +74,18 @@ The example consumes the public C++26 module:
 import mr.renderer.lib;
 ```
 
-## Image-Comparison Test (FLIP)
+## Image-Comparison Tests (FLIP)
 
-The test suite includes `gradient_frames_match_golden`, which:
+The test suite includes:
 
-- launches the `gradient` executable
-- renders frames into a temporary test output directory
-- compares each `frame_*.png` against `tests/golden/gradient/` using NVIDIA FLIP (`flip-cuda-cli`, with `flip` fallback)
+- `gradient_frames_match_golden`
+  - launches `simple_compute_renderer`
+  - compares output against `tests/golden/gradient/`
+- `kompute_graphics_interop_frames_match_golden`
+  - launches `kompute_graphics_interop_renderer`
+  - compares output against `tests/golden/kompute_graphics_interop_renderer/`
+
+Each test renders frames into a temporary test output directory and compares `frame_*.png` using NVIDIA FLIP (`flip-cuda-cli`, with `flip` fallback).
 
 Make sure `flip` is installed and available in your `PATH` before running:
 
