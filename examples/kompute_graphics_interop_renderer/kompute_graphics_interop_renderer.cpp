@@ -6,6 +6,7 @@
 #include <mr-importer/compiler.hpp>
 
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <optional>
@@ -97,6 +98,7 @@ namespace mr {
     std::unique_ptr<FrameRecorder> frame_recorder{};
 
     vk::Buffer indirect_destination_buffer{};
+    DeviceBuffer indirect_draw_buffer{};
     VertexBuffer vertex_buffer{};
     IndexBuffer index_buffer{};
     std::optional<ColorAttachmentImage> color_image{};
@@ -191,8 +193,30 @@ namespace mr {
       vk::CommandBufferBeginInfo begin_info{};
       begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
       ASSERT(upload_cmd.begin(begin_info) == vk::Result::eSuccess, "vk::CommandBuffer::begin(upload) failed");
-      vertex_buffer.write(upload_cmd, std::as_bytes(std::span{vertices}));
-      index_buffer.write(upload_cmd, std::as_bytes(std::span{indices}));
+      HostBuffer vertex_staging(
+        *vulkan_context,
+        sizeof(vertices),
+        vk::BufferUsageFlagBits::eTransferSrc,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+      HostBuffer index_staging(
+        *vulkan_context,
+        sizeof(indices),
+        vk::BufferUsageFlagBits::eTransferSrc,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+      vertex_staging.write(std::as_bytes(std::span{vertices}));
+      index_staging.write(std::as_bytes(std::span{indices}));
+
+      vk::BufferCopy vertex_copy{};
+      vertex_copy.srcOffset = 0;
+      vertex_copy.dstOffset = 0;
+      vertex_copy.size = sizeof(vertices);
+      upload_cmd.copyBuffer(vertex_staging.buffer(), vertex_buffer.buffer(), vertex_copy);
+
+      vk::BufferCopy index_copy{};
+      index_copy.srcOffset = 0;
+      index_copy.dstOffset = 0;
+      index_copy.size = sizeof(indices);
+      upload_cmd.copyBuffer(index_staging.buffer(), index_buffer.buffer(), index_copy);
       ASSERT(upload_cmd.end() == vk::Result::eSuccess, "vk::CommandBuffer::end(upload) failed");
 
       vk::SubmitInfo upload_submit{};
@@ -340,6 +364,11 @@ namespace mr {
         ->record<kp::OpAlgoDispatch>(compute_algorithm);
       indirect_destination_buffer = *destination_indirect_tensor->getPrimaryBuffer();
       ASSERT(static_cast<bool>(indirect_destination_buffer), "Kompute destination indirect buffer is null");
+      indirect_draw_buffer = DeviceBuffer(
+        *vulkan_context,
+        sizeof(DrawIndexedCommandRaw),
+        vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eIndirectBuffer,
+        vk::MemoryPropertyFlagBits::eDeviceLocal);
     }
 
     void record_graphics_command_buffer(vk::CommandBuffer command_buffer)
@@ -348,15 +377,20 @@ namespace mr {
       color_image->transition_layout(command_buffer, vk::ImageLayout::eColorAttachmentOptimal);
 
       vk::BufferMemoryBarrier indirect_barrier{};
-      indirect_barrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
+      vk::BufferCopy indirect_copy{};
+      indirect_copy.srcOffset = 0;
+      indirect_copy.dstOffset = 0;
+      indirect_copy.size = sizeof(DrawIndexedCommandRaw);
+      command_buffer.copyBuffer(indirect_destination_buffer, indirect_draw_buffer.buffer(), indirect_copy);
+      indirect_barrier.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
       indirect_barrier.dstAccessMask = vk::AccessFlagBits::eIndirectCommandRead;
       indirect_barrier.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
       indirect_barrier.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
-      indirect_barrier.buffer = indirect_destination_buffer;
+      indirect_barrier.buffer = indirect_draw_buffer.buffer();
       indirect_barrier.offset = 0;
       indirect_barrier.size = sizeof(DrawIndexedCommandRaw);
       command_buffer.pipelineBarrier(
-        vk::PipelineStageFlagBits::eComputeShader,
+        vk::PipelineStageFlagBits::eTransfer,
         vk::PipelineStageFlagBits::eDrawIndirect,
         vk::DependencyFlags{},
         {},
@@ -372,13 +406,25 @@ namespace mr {
       rendering_info.colorAttachmentCount = 1;
       rendering_info.pColorAttachments = &color_attachment_info;
       command_buffer.beginRendering(rendering_info);
+      vk::Viewport viewport{};
+      viewport.x = 0.0f;
+      viewport.y = 0.0f;
+      viewport.width = static_cast<float>(width);
+      viewport.height = static_cast<float>(height);
+      viewport.minDepth = 0.0f;
+      viewport.maxDepth = 1.0f;
+      command_buffer.setViewport(0, viewport);
+      vk::Rect2D scissor{};
+      scissor.offset = vk::Offset2D{0, 0};
+      scissor.extent = vk::Extent2D{width, height};
+      command_buffer.setScissor(0, scissor);
       graphics_pipeline.bind(command_buffer);
 
       vk::DeviceSize vb_offset = 0;
       command_buffer.bindVertexBuffers(0, vertex_buffer.buffer(), vb_offset);
       command_buffer.bindIndexBuffer(index_buffer.buffer(), 0, index_buffer.index_type());
       command_buffer.drawIndexedIndirect(
-        indirect_destination_buffer,
+        indirect_draw_buffer.buffer(),
         0,
         1,
         sizeof(vk::DrawIndexedIndirectCommand));
@@ -402,7 +448,7 @@ namespace mr {
       ASSERT(record_result.has_value(), "FrameRecorder::begin_recording failed", record_result.error());
       auto recorded = *record_result;
       frame_recorder->declare_buffer_usage(recorded, FrameRecorder::BufferUsageDesc{
-        .buffer = indirect_destination_buffer,
+        .buffer = indirect_draw_buffer.buffer(),
         .offset = 0,
         .size = sizeof(DrawIndexedCommandRaw),
         .stage = vk::PipelineStageFlagBits2::eDrawIndirect,
@@ -476,6 +522,7 @@ namespace mr {
       color_image.reset();
       index_buffer = {};
       vertex_buffer = {};
+      indirect_draw_buffer = {};
       indirect_destination_buffer = nullptr;
 
       device = {};

@@ -38,7 +38,7 @@ namespace mr {
       builder.set_app_name(app_name)
         .set_headless(headless)
         .request_validation_layers(validation_enabled())
-        .require_api_version(1, 2, 0);
+        .require_api_version(1, 3, 0);
       if (validation_enabled()) {
         builder.use_default_debug_messenger();
       }
@@ -1906,7 +1906,6 @@ namespace mr {
       graphics_submissions = frame_state.graphics_submissions;
       compute_submissions = frame_state.compute_submissions;
     }
-
     if (graphics_submissions.empty() && compute_submissions.empty()) {
       return impl_->timeline_counter;
     }
