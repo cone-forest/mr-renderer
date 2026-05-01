@@ -11,3 +11,4 @@ frames_out/
 *.pyo
 *.pyd
 .DS_Store
+*.bin
