@@ -435,6 +435,9 @@ namespace mr {
 
     vkb::PhysicalDeviceSelector selector(context.instance, create_info.surface);
     selector.require_present(create_info.require_present);
+    if (!create_info.headless || create_info.require_present) {
+      selector.add_required_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    }
     auto physical_result = selector.select();
     if (!physical_result.has_value()) {
       return std::unexpected("vk-bootstrap failed to select a Vulkan physical device");
@@ -1139,7 +1142,7 @@ namespace mr {
     ASSERT(result == VK_SUCCESS, "vmaCreateImage failed", static_cast<int>(result));
 
     if (create_image_view) {
-      image_view_ = create_image_view(0, mip_levels_);
+      image_view_ = this->create_image_view(0, mip_levels_);
       owns_image_view_ = true;
     }
   }

@@ -123,7 +123,7 @@ namespace mr {
 
       auto context_result = create_vulkan_context(VulkanContextCreateInfo{
         .app_name = "mr-renderer",
-        .headless = true,
+        .headless = false,
         .require_present = false,
         .surface = VK_NULL_HANDLE,
         .prefer_dedicated_compute_queue = true,
