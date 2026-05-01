@@ -4,10 +4,12 @@
 #include <memory>
 
 #include <mr-renderer/renderer.hpp>
+#include <mr-renderer/vulkan_wrappers.hpp>
 
 namespace mr {
   struct KomputeGraphicsInteropRenderer : IRenderer {
-    KomputeGraphicsInteropRenderer(uint32_t width, uint32_t height);
+    explicit KomputeGraphicsInteropRenderer(uint32_t width, uint32_t height);
+    KomputeGraphicsInteropRenderer(const VulkanContext& shared_context, uint32_t width, uint32_t height);
     ~KomputeGraphicsInteropRenderer() override;
 
     KomputeGraphicsInteropRenderer(const KomputeGraphicsInteropRenderer&) = delete;
@@ -15,7 +17,9 @@ namespace mr {
     KomputeGraphicsInteropRenderer(KomputeGraphicsInteropRenderer&&) noexcept;
     KomputeGraphicsInteropRenderer& operator=(KomputeGraphicsInteropRenderer&&) noexcept;
 
-    coro::generator<Frame> frames() override;
+    [[nodiscard]] const VulkanContext& vulkan_context() const;
+
+    coro::generator<Frame> frames(coro::generator<Target> targets) override;
 
   private:
     struct Impl;

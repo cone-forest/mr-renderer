@@ -3,6 +3,12 @@ cmake_minimum_required(VERSION 4.0)
 project(mr-renderer-lib)
 option(MR_RENDERER_ENABLE_TRACY "Enable Tracy instrumentation" ON)
 
+# libc++ for Clang applies to vcpkg (triplet) and to FetchContent/CPM deps (Kompute, vk-bootstrap).
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
+  add_link_options($<$<LINK_LANGUAGE:CXX>:-stdlib=libc++>)
+endif()
+
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/deps.cmake)
 
 file(GLOB_RECURSE PRIVATE_SOURCES
@@ -54,14 +60,7 @@ else()
   target_compile_options(mr-renderer-lib PRIVATE -fno-exceptions)
 endif()
 
-# libassert (via mr-utils) is built with GCC against libstdc++. With Clang and
-# -stdlib=libc++, the linker may drop -lstdc++ under --as-needed, causing
-# "undefined reference ... @@GLIBCXX_*" / "DSO missing from command line".
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-  target_link_options(mr-renderer-lib PUBLIC "LINKER:--push-state,--no-as-needed")
-  target_link_libraries(mr-renderer-lib PUBLIC stdc++)
-  target_link_options(mr-renderer-lib PUBLIC "LINKER:--pop-state")
-endif()
+# Clang presets use triplet x64-linux-clang-libcxx so vcpkg static deps match libc++ ABI.
 
 # headers
 target_include_directories(mr-renderer-lib PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include)

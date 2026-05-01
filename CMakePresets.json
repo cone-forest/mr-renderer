@@ -16,15 +16,17 @@
         "CMAKE_CXX_STANDARD": "26",
         "CMAKE_CXX_STANDARD_REQUIRED": "ON",
         "CMAKE_CXX_EXTENSIONS": "OFF",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_OVERLAY_PORTS": "${sourceDir}/vcpkg-overlays/ports"
       }
     },
     {
-      "name": "clang-debug",
+      "name": "clang-vcpkg",
+      "hidden": true,
       "inherits": "base",
-      "displayName": "Clang Debug (C++26)",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug"
+        "VCPKG_TARGET_TRIPLET": "x64-linux-clang-libcxx",
+        "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/vcpkg-overlays/triplets"
       },
       "environment": {
         "CC": "clang",
@@ -32,15 +34,19 @@
       }
     },
     {
+      "name": "clang-debug",
+      "inherits": "clang-vcpkg",
+      "displayName": "Clang Debug (C++26, libc++)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
       "name": "clang-release",
-      "inherits": "base",
-      "displayName": "Clang Release (C++26)",
+      "inherits": "clang-vcpkg",
+      "displayName": "Clang Release (C++26, libc++)",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
-      },
-      "environment": {
-        "CC": "clang",
-        "CXX": "clang++"
       }
     },
     {

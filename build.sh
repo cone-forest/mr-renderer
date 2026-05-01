@@ -118,7 +118,16 @@ if [[ ! -x "$VCPKG_ROOT/vcpkg" ]]; then
 fi
 
 echo "==> installing vcpkg dependencies (manifest mode)..."
-"$VCPKG_ROOT/vcpkg" install --overlay-ports="$SCRIPT_DIR/vcpkg-overlays/ports"
+VCPKG_INSTALL_ARGS=(--overlay-ports="$SCRIPT_DIR/vcpkg-overlays/ports")
+case "$PRESET" in
+  clang-debug | clang-release)
+    VCPKG_INSTALL_ARGS+=(
+      --triplet=x64-linux-clang-libcxx
+      "--overlay-triplets=$SCRIPT_DIR/vcpkg-overlays/triplets"
+    )
+    ;;
+esac
+"$VCPKG_ROOT/vcpkg" install "${VCPKG_INSTALL_ARGS[@]}"
 
 CONFIGURE_CMD=(
   cmake

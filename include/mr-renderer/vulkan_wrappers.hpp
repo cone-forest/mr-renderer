@@ -42,6 +42,8 @@ namespace mr {
     bool prefer_dedicated_compute_queue = true;
     bool enable_pipeline_cache = true;
     std::string pipeline_cache_path = ".mr-renderer-pipeline-cache.bin";
+    /// GLFW/VKFW surface instance extensions (and any others) not covered by headless setup.
+    std::span<const char* const> instance_extensions{};
   };
 
   struct VulkanContext {
@@ -79,8 +81,14 @@ namespace mr {
     void flush_pipeline_cache() const;
   };
 
+  [[nodiscard]] std::expected<vkb::Instance, std::string>
+  create_vulkan_instance(const char* app_name, bool headless, std::span<const char* const> extensions);
+
   [[nodiscard]] std::expected<VulkanContext, std::string>
   create_vulkan_context(const VulkanContextCreateInfo& create_info);
+
+  [[nodiscard]] std::expected<VulkanContext, std::string>
+  create_vulkan_context(const VulkanContextCreateInfo& create_info, vkb::Instance instance);
 
   struct VulkanPhysicalDeviceInfo {
     uint32_t vendor_id = 0;
@@ -500,6 +508,8 @@ namespace mr {
       vk::ImageUsageFlags usage);
 
   protected:
+    void destroy_image_resources() noexcept;
+
     vk::ImageView create_image_view(uint32_t mip_level, uint32_t mip_levels_count);
 
     const VulkanContext* context_ = nullptr;

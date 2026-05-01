@@ -4,6 +4,7 @@ module;
 #include <mr-renderer/frame.hpp>
 #include <mr-renderer/presenter.hpp>
 #include <mr-renderer/renderer.hpp>
+#include <mr-renderer/target.hpp>
 #include <mr-renderer/window_presenter.hpp>
 #include <mr-renderer/vulkan_wrappers.hpp>
 
@@ -11,6 +12,7 @@ export module mr.renderer.lib;
 
 export namespace mr {
   using ::mr::CpuFrame;
+  using ::mr::CpuTarget;
   using ::mr::FilePresenter;
   using ::mr::Frame;
   using ::mr::FramePayload;
@@ -20,6 +22,7 @@ export namespace mr {
   using ::mr::GraphicsPipelineDesc;
   using ::mr::GraphicsShaderStageDesc;
   using ::mr::GpuFrame;
+  using ::mr::GpuTarget;
   using ::mr::IPresenter;
   using ::mr::IRenderer;
   using ::mr::Buffer;
@@ -31,6 +34,8 @@ export namespace mr {
   using ::mr::VulkanContext;
   using ::mr::VulkanContextCreateInfo;
   using ::mr::VulkanFeatureSupport;
+  using ::mr::Target;
+  using ::mr::TargetPayload;
   using ::mr::VulkanPhysicalDeviceInfo;
   using ::mr::HostBuffer;
   using ::mr::HostImage;
@@ -44,6 +49,7 @@ export namespace mr {
   using ::mr::TextureImage;
   using ::mr::UniformBuffer;
   using ::mr::QueueTarget;
+  using ::mr::RgbaFloatRasterView;
   using ::mr::VectorBuffer;
   using ::mr::VertexHeapBuffer;
   using ::mr::VertexVectorBuffer;
@@ -54,5 +60,6 @@ export namespace mr {
   using ::mr::copy_buffer;
   using ::mr::build_graphics_pipeline;
   using ::mr::create_vulkan_context;
+  using ::mr::create_vulkan_instance;
   using ::mr::enumerate_vulkan_physical_devices;
 }

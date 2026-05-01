@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <libassert/assert.hpp>
+#include <mr-renderer/target.hpp>
 #include <mr-renderer/vulkan_wrappers.hpp>
 #include <mr-importer/compiler.hpp>
 
@@ -39,6 +40,27 @@ namespace mr {
         return nullptr;
       }
       return &(*it);
+    }
+
+    void copy_linear_tensor_to_cpu_target_pixels(
+      const std::vector<float>& linear_rgba,
+      uint32_t width,
+      uint32_t height,
+      CpuTarget& cpu_target)
+    {
+      MR_TRACY_ZONE;
+      const auto h = static_cast<std::size_t>(height);
+      const auto w = static_cast<std::size_t>(width);
+      const size_t expected_floats = w * h * 4u;
+      ASSERT(linear_rgba.size() >= expected_floats, "tensor data smaller than expected RGBA float image");
+      for (std::size_t y = 0; y < h; ++y) {
+        for (std::size_t x = 0; x < w; ++x) {
+          for (std::size_t c = 0; c < 4zu; ++c) {
+            const std::size_t idx = (((y * w) + x) * 4zu) + c;
+            cpu_target.pixels[y, x, c] = linear_rgba.at(idx);
+          }
+        }
+      }
     }
 
     void fill_frame_pixels(
@@ -134,17 +156,21 @@ namespace mr {
   SimpleComputeRenderer::SimpleComputeRenderer(uint32_t width, uint32_t height)
     : width_(width == 0 ? 1u : width)
     , height_(height == 0 ? 1u : height)
-  {}
+  {
+    MR_TRACY_ZONE_N("SimpleComputeRenderer::SimpleComputeRenderer");
+  }
 
-  coro::generator<Frame> SimpleComputeRenderer::frames()
+  coro::generator<Frame> SimpleComputeRenderer::frames(coro::generator<Target> targets)
   {
     MR_TRACY_ZONE_N("SimpleComputeRenderer::frames");
     const std::filesystem::path shader_path =
       std::filesystem::path(MR_RENDERER_LIB_SHADER_DIR) / "gradient.slang";
 
-    const auto compiled = mr::importer::compile(shader_path);
-    ASSERT(compiled, "mr::importer::compile failed for gradient.slang");
-    const mr::importer::Shader* cs = pick_compute(compiled.value());
+    const auto compiled_opt = mr::importer::compile(shader_path);
+    ASSERT(compiled_opt.has_value(), "mr::importer::compile failed for gradient.slang");
+    // NOLINTNEXTLINE(bugprone-unchecked-optional-access): guarded by ASSERT(has_value)
+    const std::vector<mr::importer::Shader>& shaders = compiled_opt.value();
+    const mr::importer::Shader* cs = pick_compute(shaders);
     ASSERT(cs != nullptr, "no compute shader stage in compiled gradient.slang");
     const std::vector<uint32_t> spirv = spirv_words(*cs);
 
@@ -180,14 +206,26 @@ namespace mr {
         ->record<kp::OpAlgoDispatch>(algorithm)
         ->record<kp::OpSyncLocal>(sync_from_device);
 
-    int idx = 0;
-    while (true) {
+    for (Target present_target : targets) {
       MR_TRACY_FRAME("simple_compute_frame");
+      auto* cpu_target = std::get_if<CpuTarget>(&present_target.payload);
+      ASSERT(cpu_target != nullptr, "SimpleComputeRenderer expects CpuTarget inputs");
+      ASSERT(
+        cpu_target->pixels.extent(0) == static_cast<std::size_t>(height_) &&
+          cpu_target->pixels.extent(1) == static_cast<std::size_t>(width_),
+        "CpuTarget dimensions must match renderer extent");
+
       seq->eval();
 
+      const std::vector<float>& linear_rgba = output->vector();
+      copy_linear_tensor_to_cpu_target_pixels(linear_rgba, width_, height_, *cpu_target);
+
       CpuFrame cpu_frame{};
-      fill_frame_pixels(cpu_frame, output->vector(), width_, height_);
-      co_yield Frame{static_cast<uint32_t>(idx++), std::move(cpu_frame)};
+      cpu_frame.width = width_;
+      cpu_frame.height = height_;
+      cpu_frame.presenter_slot_id = cpu_target->presenter_slot_id;
+      cpu_frame.presenter_generation = cpu_target->presenter_generation;
+      co_yield Frame{present_target.index, std::move(cpu_frame)};
     }
   }
 

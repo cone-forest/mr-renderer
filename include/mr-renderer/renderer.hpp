@@ -3,6 +3,7 @@
 #include <coro/generator.hpp>
 
 #include "frame.hpp"
+#include "target.hpp"
 
 namespace mr {
   struct IRenderer {
@@ -12,7 +13,7 @@ namespace mr {
     constexpr IRenderer(IRenderer&&) noexcept = default;
     constexpr IRenderer& operator=(IRenderer&&) noexcept = default;
 
-    virtual coro::generator<Frame> frames() = 0;
+    virtual coro::generator<Frame> frames(coro::generator<Target> targets) = 0;
     virtual ~IRenderer() = default;
   };
 }

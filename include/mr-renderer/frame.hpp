@@ -14,6 +14,8 @@ namespace mr {
   struct CpuFrame {
     uint32_t width = 0;
     uint32_t height = 0;
+    uint32_t presenter_slot_id = UINT32_MAX;
+    uint64_t presenter_generation = 0;
     std::vector<float> rgba32f{};
 
     CpuFrame() = default;
@@ -30,6 +32,9 @@ namespace mr {
     vk::Format format = vk::Format::eR8G8B8A8Unorm;
     vk::Semaphore ready_semaphore{};
     vk::PipelineStageFlags wait_stage = vk::PipelineStageFlagBits::eTransfer;
+    uint32_t presenter_slot_id = UINT32_MAX;
+    uint64_t presenter_generation = 0;
+    vk::Semaphore render_finished_semaphore{};
 
     GpuFrame() = default;
     explicit operator CpuFrame() const;

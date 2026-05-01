@@ -2,10 +2,14 @@
 #include "kompute_graphics_interop_renderer.hpp"
 
 #include <libassert/assert.hpp>
+#include <mr-renderer/target.hpp>
 #include <mr-renderer/vulkan_wrappers.hpp>
 #include <mr-importer/compiler.hpp>
 
 #include <array>
+#include <bit>
+#include <cstddef>
+#include <exception>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -40,6 +44,14 @@ namespace mr {
       uint32_t first_instance;
     };
 
+    uint32_t queue_family_for_upload(const VulkanContext& context)
+    {
+      if (context.graphics_queue_family != std::numeric_limits<uint32_t>::max()) {
+        return context.graphics_queue_family;
+      }
+      return context.compute_queue_family;
+    }
+
     std::vector<uint32_t> spirv_words(const mr::importer::Shader& shader)
     {
       MR_TRACY_ZONE;
@@ -66,18 +78,149 @@ namespace mr {
 
     vk::ShaderModule create_shader_module(const vk::Device device, const std::vector<uint32_t>& spirv)
     {
-      MR_TRACY_ZONE;
       vk::ShaderModuleCreateInfo shader_info{};
       shader_info.codeSize = spirv.size() * sizeof(uint32_t);
       shader_info.pCode = spirv.data();
       return vk_expect(device.createShaderModule(shader_info), "vk::createShaderModule failed");
+    }
+
+    void unpack_rgba8_bytes_to_float_raster(
+      std::span<const std::byte> bytes,
+      uint32_t width,
+      uint32_t height,
+      RgbaFloatRasterView out_pixels)
+    {
+      const auto byte_size = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+      ASSERT(bytes.size() >= byte_size, "readback byte size too small");
+      for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+          const size_t p =
+            ((static_cast<size_t>(y) * static_cast<size_t>(width)) + static_cast<size_t>(x)) * 4u;
+          out_pixels[static_cast<std::size_t>(y), static_cast<std::size_t>(x), 0zu] =
+            static_cast<float>(std::to_integer<uint8_t>(bytes.at(p + 0u))) / 255.0f;
+          out_pixels[static_cast<std::size_t>(y), static_cast<std::size_t>(x), 1zu] =
+            static_cast<float>(std::to_integer<uint8_t>(bytes.at(p + 1u))) / 255.0f;
+          out_pixels[static_cast<std::size_t>(y), static_cast<std::size_t>(x), 2zu] =
+            static_cast<float>(std::to_integer<uint8_t>(bytes.at(p + 2u))) / 255.0f;
+          out_pixels[static_cast<std::size_t>(y), static_cast<std::size_t>(x), 3zu] =
+            static_cast<float>(std::to_integer<uint8_t>(bytes.at(p + 3u))) / 255.0f;
+        }
+      }
+    }
+
+    // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+    void readback_rgba8_unorm_image_to_raster(
+      const VulkanContext& context,
+      vk::Image image,
+      vk::ImageLayout layout,
+      uint32_t width,
+      uint32_t height,
+      RgbaFloatRasterView out_pixels)
+    {
+      MR_TRACY_ZONE;
+      ASSERT(out_pixels.extent(0) == static_cast<std::size_t>(height), "raster height mismatch");
+      ASSERT(out_pixels.extent(1) == static_cast<std::size_t>(width), "raster width mismatch");
+      ASSERT(out_pixels.extent(2) == 4zu, "raster channels mismatch");
+
+      const vk::DeviceSize byte_size =
+        static_cast<vk::DeviceSize>(width) * static_cast<vk::DeviceSize>(height) * 4u;
+
+      HostBuffer readback(
+        context,
+        byte_size,
+        vk::BufferUsageFlagBits::eTransferDst,
+        vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
+
+      vk::CommandPoolCreateInfo pool_info{};
+      pool_info.queueFamilyIndex = queue_family_for_upload(context);
+      pool_info.flags = vk::CommandPoolCreateFlagBits::eTransient;
+      auto pool_rv = context.vk_device().createCommandPool(pool_info);
+      ASSERT(pool_rv.result == vk::Result::eSuccess, "readback createCommandPool failed");
+      vk::CommandPool pool = pool_rv.value;
+
+      vk::CommandBufferAllocateInfo alloc_info{};
+      alloc_info.commandPool = pool;
+      alloc_info.level = vk::CommandBufferLevel::ePrimary;
+      alloc_info.commandBufferCount = 1;
+      auto cmd_rv = context.vk_device().allocateCommandBuffers(alloc_info);
+      ASSERT(cmd_rv.result == vk::Result::eSuccess, "readback allocateCommandBuffers failed");
+      vk::CommandBuffer cmd = cmd_rv.value.at(0);
+
+      vk::CommandBufferBeginInfo begin_info{};
+      begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+      ASSERT(cmd.begin(begin_info) == vk::Result::eSuccess, "readback begin failed");
+
+      vk::ImageMemoryBarrier to_transfer_src{};
+      to_transfer_src.oldLayout = layout;
+      to_transfer_src.newLayout = vk::ImageLayout::eTransferSrcOptimal;
+      to_transfer_src.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+      to_transfer_src.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+      to_transfer_src.image = image;
+      to_transfer_src.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+      to_transfer_src.subresourceRange.baseMipLevel = 0;
+      to_transfer_src.subresourceRange.levelCount = 1;
+      to_transfer_src.subresourceRange.baseArrayLayer = 0;
+      to_transfer_src.subresourceRange.layerCount = 1;
+      to_transfer_src.srcAccessMask = vk::AccessFlagBits::eMemoryWrite;
+      to_transfer_src.dstAccessMask = vk::AccessFlagBits::eTransferRead;
+      cmd.pipelineBarrier(
+        vk::PipelineStageFlagBits::eAllCommands,
+        vk::PipelineStageFlagBits::eTransfer,
+        vk::DependencyFlags{},
+        {},
+        {},
+        to_transfer_src);
+
+      vk::BufferImageCopy copy_region{};
+      copy_region.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+      copy_region.imageSubresource.mipLevel = 0;
+      copy_region.imageSubresource.baseArrayLayer = 0;
+      copy_region.imageSubresource.layerCount = 1;
+      copy_region.imageExtent = vk::Extent3D{.width = width, .height = height, .depth = 1u};
+      cmd.copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal, readback.buffer(), copy_region);
+
+      if (layout != vk::ImageLayout::eTransferSrcOptimal) {
+        vk::ImageMemoryBarrier restore_layout{};
+        restore_layout.oldLayout = vk::ImageLayout::eTransferSrcOptimal;
+        restore_layout.newLayout = layout;
+        restore_layout.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+        restore_layout.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+        restore_layout.image = image;
+        restore_layout.subresourceRange = to_transfer_src.subresourceRange;
+        restore_layout.srcAccessMask = vk::AccessFlagBits::eTransferRead;
+        restore_layout.dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+        cmd.pipelineBarrier(
+          vk::PipelineStageFlagBits::eTransfer,
+          vk::PipelineStageFlagBits::eAllCommands,
+          vk::DependencyFlags{},
+          {},
+          {},
+          restore_layout);
+      }
+
+      ASSERT(cmd.end() == vk::Result::eSuccess, "readback end failed");
+
+      vk::SubmitInfo submit_info{};
+      submit_info.commandBufferCount = 1;
+      submit_info.pCommandBuffers = &cmd;
+      ASSERT(
+        context.graphics_queue.submit(submit_info, vk::Fence{}) == vk::Result::eSuccess,
+        "readback queue submit failed");
+      ASSERT(context.graphics_queue.waitIdle() == vk::Result::eSuccess, "readback waitIdle failed");
+
+      context.vk_device().freeCommandBuffers(pool, cmd);
+      context.vk_device().destroyCommandPool(pool);
+
+      unpack_rgba8_bytes_to_float_raster(readback.read(), width, height, out_pixels);
     }
   } // namespace
 
   struct KomputeGraphicsInteropRenderer::Impl {
     uint32_t width = 1;
     uint32_t height = 1;
-    std::unique_ptr<VulkanContext> vulkan_context{};
+
+    std::unique_ptr<VulkanContext> owned_vulkan_context{};
+    VulkanContext* active_context = nullptr;
 
     vkb::Instance instance{};
     vkb::PhysicalDevice physical_device{};
@@ -107,84 +250,67 @@ namespace mr {
     std::optional<ColorAttachmentImage> color_image{};
 
     GraphicsPipeline graphics_pipeline{};
+    vk::Format graphics_pipeline_format = vk::Format::eUndefined;
+
+    vk::CommandPool gfx_transient_pool{};
 
     Impl() = default;
     Impl(const Impl&) = delete;
     Impl& operator=(const Impl&) = delete;
     Impl(Impl&&) = delete;
     Impl& operator=(Impl&&) = delete;
-    ~Impl() { shutdown(); }
-
-    void initialize(uint32_t requested_width, uint32_t requested_height) // NOLINT(readability-function-cognitive-complexity)
+    ~Impl() noexcept
     {
-      MR_TRACY_ZONE_N("KomputeInterop::initialize");
-      width = requested_width == 0 ? 1u : requested_width;
-      height = requested_height == 0 ? 1u : requested_height;
+      try {
+        shutdown();
+      } catch (...) {
+        std::terminate();
+      }
+    }
 
-      auto context_result = create_vulkan_context(VulkanContextCreateInfo{
-        .app_name = "mr-renderer",
-        .headless = false,
-        .require_present = false,
-        .surface = VK_NULL_HANDLE,
-        .prefer_dedicated_compute_queue = true,
-      });
-      ASSERT(context_result.has_value(), "vulkan context creation failed", context_result.error());
-      vulkan_context = std::make_unique<VulkanContext>(std::move(*context_result));
+    [[nodiscard]] const VulkanContext& vulkan_ctx() const
+    {
+      ASSERT(active_context != nullptr, "no Vulkan context");
+      return *active_context;
+    }
 
-      instance = vulkan_context->instance;
-      physical_device = vulkan_context->physical_device;
-      device = vulkan_context->device;
-      graphics_queue_family = vulkan_context->graphics_queue_family;
-      kompute_queue_family = vulkan_context->compute_queue_family;
-      graphics_queue = vulkan_context->graphics_queue;
-      kompute_queue = vulkan_context->compute_queue;
-      feature_support = vulkan_context->feature_support;
-      ASSERT(feature_support.dynamic_rendering, "dynamic rendering is required for this example");
+    [[nodiscard]] VulkanContext& vulkan_ctx_mut()
+    {
+      ASSERT(active_context != nullptr, "no Vulkan context");
+      return *active_context;
+    }
 
-      ASSERT(static_cast<bool>(graphics_queue), "failed to acquire graphics queue handle");
-      ASSERT(static_cast<bool>(kompute_queue), "failed to acquire compute queue handle");
+    void ensure_dimensions(uint32_t w, uint32_t h)
+    {
+      width = w == 0 ? 1u : w;
+      height = h == 0 ? 1u : h;
+    }
 
-      const auto queue_props = physical_device.get_queue_families();
-      const vk::QueueFlags graphics_flags{queue_props.at(graphics_queue_family).queueFlags};
-      const vk::QueueFlags kompute_flags{queue_props.at(kompute_queue_family).queueFlags};
-      ASSERT((graphics_flags & vk::QueueFlagBits::eGraphics) != vk::QueueFlags{}, "graphics queue must support graphics");
-      ASSERT((graphics_flags & vk::QueueFlagBits::eCompute) != vk::QueueFlags{}, "graphics queue must support compute");
-      ASSERT((graphics_flags & vk::QueueFlagBits::eTransfer) != vk::QueueFlags{}, "graphics queue must support transfer");
-      ASSERT((kompute_flags & vk::QueueFlagBits::eCompute) != vk::QueueFlags{}, "kompute queue must support compute");
-      ASSERT((kompute_flags & vk::QueueFlagBits::eTransfer) != vk::QueueFlags{}, "kompute queue must support transfer");
-      ASSERT(
-        kompute_queue_family == graphics_queue_family ||
-          (kompute_flags & vk::QueueFlagBits::eGraphics) == vk::QueueFlags{},
-        "kompute queue should be compute/transfer-only when a dedicated family is available");
-
-      kp_instance = std::shared_ptr<vk::Instance>(new vk::Instance(instance.instance), [](vk::Instance*) {});
-      kp_physical_device = std::shared_ptr<vk::PhysicalDevice>(
-        new vk::PhysicalDevice(physical_device.physical_device),
-        [](vk::PhysicalDevice*) {});
-      kp_device = std::shared_ptr<vk::Device>(new vk::Device(device.device), [](vk::Device*) {});
-      kp_kompute_queue =
-        std::shared_ptr<vk::Queue>(new vk::Queue(kompute_queue), [](vk::Queue*) {});
-
-      const std::filesystem::path shader_dir = std::filesystem::path(MR_RENDERER_LIB_SHADER_DIR);
-
-      frame_recorder = std::make_unique<FrameRecorder>(*vulkan_context);
-      create_static_mesh_buffers();
-      create_render_target();
-      create_graphics_pipeline(shader_dir / "interop_raster.slang");
-      initialize_kompute(shader_dir / "interop_indirect_copy.slang");
+    void wire_context_pointers()
+    {
+      const VulkanContext& ctx = vulkan_ctx();
+      instance = ctx.instance;
+      physical_device = ctx.physical_device;
+      device = ctx.device;
+      graphics_queue_family = ctx.graphics_queue_family;
+      kompute_queue_family = ctx.compute_queue_family;
+      graphics_queue = ctx.graphics_queue;
+      kompute_queue = ctx.compute_queue;
+      feature_support = ctx.feature_support;
     }
 
     void create_static_mesh_buffers()
     {
       MR_TRACY_ZONE_N("KomputeInterop::create_static_mesh_buffers");
+      VulkanContext& ctx = vulkan_ctx_mut();
       const std::array<Vertex, 3> vertices = {{
         {.position = {-0.7f, -0.7f}, .color = {1.0f, 0.0f, 0.0f}},
         {.position = {0.0f, 0.7f}, .color = {0.0f, 1.0f, 0.0f}},
         {.position = {0.7f, -0.7f}, .color = {0.0f, 0.0f, 1.0f}},
       }};
       const std::array<uint32_t, 3> indices = {{0u, 1u, 2u}};
-      vertex_buffer = VertexBuffer(*vulkan_context, sizeof(vertices));
-      index_buffer = IndexBuffer(*vulkan_context, sizeof(indices), vk::IndexType::eUint32);
+      vertex_buffer = VertexBuffer(ctx, sizeof(vertices));
+      index_buffer = IndexBuffer(ctx, sizeof(indices), vk::IndexType::eUint32);
       index_buffer.set_element_count(indices.size());
 
       vk::CommandPoolCreateInfo upload_pool_info{};
@@ -206,12 +332,12 @@ namespace mr {
       begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
       ASSERT(upload_cmd.begin(begin_info) == vk::Result::eSuccess, "vk::CommandBuffer::begin(upload) failed");
       HostBuffer vertex_staging(
-        *vulkan_context,
+        ctx,
         sizeof(vertices),
         vk::BufferUsageFlagBits::eTransferSrc,
         vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
       HostBuffer index_staging(
-        *vulkan_context,
+        ctx,
         sizeof(indices),
         vk::BufferUsageFlagBits::eTransferSrc,
         vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
@@ -240,23 +366,33 @@ namespace mr {
       vk::Device(device.device).destroyCommandPool(upload_pool);
     }
 
-    void create_render_target()
+    void create_or_resize_color_image()
     {
       MR_TRACY_ZONE;
       color_image.emplace(
-        *vulkan_context,
+        vulkan_ctx_mut(),
         vk::Extent3D{.width = width, .height = height, .depth = 1u},
         vk::Format::eR8G8B8A8Unorm);
     }
 
-    void create_graphics_pipeline(const std::filesystem::path& shader_path)
+    void ensure_graphics_pipeline_for_format(
+      const std::filesystem::path& shader_path,
+      vk::Format color_format)
     {
-      MR_TRACY_ZONE_N("KomputeInterop::create_graphics_pipeline");
-      const auto compiled = mr::importer::compile(shader_path);
-      ASSERT(compiled, "mr::importer::compile failed for interop_raster.slang");
+      MR_TRACY_ZONE_N("KomputeInterop::ensure_graphics_pipeline_for_format");
+      if (graphics_pipeline_format == color_format && graphics_pipeline.valid()) {
+        return;
+      }
+      graphics_pipeline = {};
+      graphics_pipeline_format = color_format;
 
-      const mr::importer::Shader* vs = pick_stage(compiled.value(), vk::ShaderStageFlagBits::eVertex);
-      const mr::importer::Shader* fs = pick_stage(compiled.value(), vk::ShaderStageFlagBits::eFragment);
+      const auto compiled = mr::importer::compile(shader_path);
+      ASSERT(compiled.has_value(), "mr::importer::compile failed for interop_raster.slang");
+      // NOLINTNEXTLINE(bugprone-unchecked-optional-access): guarded by ASSERT(has_value)
+      const auto& shaders = compiled.value();
+
+      const mr::importer::Shader* vs = pick_stage(shaders, vk::ShaderStageFlagBits::eVertex);
+      const mr::importer::Shader* fs = pick_stage(shaders, vk::ShaderStageFlagBits::eFragment);
       ASSERT(vs != nullptr, "missing vertex shader stage for interop_raster.slang");
       ASSERT(fs != nullptr, "missing fragment shader stage for interop_raster.slang");
 
@@ -301,11 +437,11 @@ namespace mr {
         {.stage = vk::ShaderStageFlagBits::eFragment, .module = fs_module, .entry_point = "main"},
       }};
       const std::array<vk::VertexInputBindingDescription, 1> binding_descs{{binding_desc}};
-      const std::array<vk::Format, 1> color_formats{{vk::Format::eR8G8B8A8Unorm}};
+      const std::array<vk::Format, 1> color_formats{{color_format}};
       const std::array<vk::PipelineColorBlendAttachmentState, 1> blend_descs{{color_blend_attachment}};
 
       auto pipeline_result =
-        GraphicsPipelineBuilder(*vulkan_context)
+        GraphicsPipelineBuilder(vulkan_ctx_mut())
           .set_shader_stages(stage_descs)
           .set_bindings(binding_descs)
           .set_attributes(attributes)
@@ -329,7 +465,8 @@ namespace mr {
     {
       MR_TRACY_ZONE_N("KomputeInterop::initialize_kompute");
       const auto compiled = mr::importer::compile(shader_path);
-      ASSERT(compiled, "mr::importer::compile failed for interop_indirect_copy.slang");
+      ASSERT(compiled.has_value(), "mr::importer::compile failed for interop_indirect_copy.slang");
+      // NOLINTNEXTLINE(bugprone-unchecked-optional-access): guarded by ASSERT(has_value)
       const mr::importer::Shader* cs = pick_stage(compiled.value(), vk::ShaderStageFlagBits::eCompute);
       ASSERT(cs != nullptr, "missing compute shader stage for interop_indirect_copy.slang");
       const std::vector<uint32_t> cs_spirv = spirv_words(*cs);
@@ -380,19 +517,18 @@ namespace mr {
       indirect_destination_buffer = *destination_indirect_tensor->getPrimaryBuffer();
       ASSERT(static_cast<bool>(indirect_destination_buffer), "Kompute destination indirect buffer is null");
       indirect_draw_buffer = DeviceBuffer(
-        *vulkan_context,
+        vulkan_ctx_mut(),
         sizeof(DrawIndexedCommandRaw),
         vk::BufferUsageFlagBits::eTransferDst | vk::BufferUsageFlagBits::eIndirectBuffer,
         vk::MemoryPropertyFlagBits::eDeviceLocal);
     }
 
-    void record_graphics_command_buffer(vk::CommandBuffer command_buffer)
+    void record_indirect_copy_and_raster(
+      vk::CommandBuffer command_buffer,
+      vk::RenderingAttachmentInfo color_attachment_info,
+      vk::Extent2D extent)
     {
-      MR_TRACY_ZONE_N("KomputeInterop::record_graphics_command_buffer");
-      ASSERT(color_image.has_value(), "color attachment image is not initialized");
-      auto& color = color_image.value();
-      color.transition_layout(command_buffer, vk::ImageLayout::eColorAttachmentOptimal);
-
+      MR_TRACY_ZONE_N("KomputeInterop::record_indirect_copy_and_raster");
       vk::BufferMemoryBarrier indirect_barrier{};
       vk::BufferCopy indirect_copy{};
       indirect_copy.srcOffset = 0;
@@ -414,11 +550,9 @@ namespace mr {
         indirect_barrier,
         {});
 
-      vk::RenderingAttachmentInfo color_attachment_info = color.attachment_info();
-      color_attachment_info.clearValue = vk::ClearColorValue(std::array<float, 4>{0.05f, 0.05f, 0.1f, 1.0f});
       vk::RenderingInfo rendering_info{};
       rendering_info.renderArea.offset = vk::Offset2D{.x = 0, .y = 0};
-      rendering_info.renderArea.extent = vk::Extent2D{.width = width, .height = height};
+      rendering_info.renderArea.extent = extent;
       rendering_info.layerCount = 1;
       rendering_info.colorAttachmentCount = 1;
       rendering_info.pColorAttachments = &color_attachment_info;
@@ -426,14 +560,14 @@ namespace mr {
       vk::Viewport viewport{};
       viewport.x = 0.0f;
       viewport.y = 0.0f;
-      viewport.width = static_cast<float>(width);
-      viewport.height = static_cast<float>(height);
+      viewport.width = static_cast<float>(extent.width);
+      viewport.height = static_cast<float>(extent.height);
       viewport.minDepth = 0.0f;
       viewport.maxDepth = 1.0f;
       command_buffer.setViewport(0, viewport);
       vk::Rect2D scissor{};
       scissor.offset = vk::Offset2D{.x = 0, .y = 0};
-      scissor.extent = vk::Extent2D{.width = width, .height = height};
+      scissor.extent = extent;
       command_buffer.setScissor(0, scissor);
       graphics_pipeline.bind(command_buffer);
 
@@ -446,14 +580,107 @@ namespace mr {
         1,
         sizeof(vk::DrawIndexedIndirectCommand));
       command_buffer.endRendering();
+    }
+
+    void record_offscreen_raster(vk::CommandBuffer command_buffer)
+    {
+      MR_TRACY_ZONE_N("KomputeInterop::record_offscreen_raster");
+      ASSERT(color_image.has_value(), "color attachment image is not initialized");
+      // NOLINTNEXTLINE(bugprone-unchecked-optional-access): guarded by ASSERT(has_value)
+      auto& color = *color_image;
+      color.transition_layout(command_buffer, vk::ImageLayout::eColorAttachmentOptimal);
+
+      vk::RenderingAttachmentInfo color_attachment_info = color.attachment_info();
+      color_attachment_info.clearValue = vk::ClearColorValue(std::array<float, 4>{0.05f, 0.05f, 0.1f, 1.0f});
+      record_indirect_copy_and_raster(
+        command_buffer,
+        color_attachment_info,
+        vk::Extent2D{.width = width, .height = height});
 
       color.transition_layout(command_buffer, vk::ImageLayout::eTransferSrcOptimal);
     }
 
-    Frame render_frame(uint32_t frame_index) // NOLINT(readability-function-cognitive-complexity)
+    void initialize_owned(uint32_t requested_width, uint32_t requested_height)
     {
-      MR_TRACY_ZONE_N("KomputeInterop::render_frame");
-      MR_TRACY_FRAME("kompute_interop_frame");
+      MR_TRACY_ZONE_N("KomputeInterop::initialize_owned");
+      ensure_dimensions(requested_width, requested_height);
+
+      auto context_result = create_vulkan_context(VulkanContextCreateInfo{
+        .app_name = "mr-renderer",
+        .headless = true,
+        .require_present = false,
+        .surface = VK_NULL_HANDLE,
+        .prefer_dedicated_compute_queue = true,
+      });
+      ASSERT(context_result.has_value(), "vulkan context creation failed", context_result.error());
+      owned_vulkan_context = std::make_unique<VulkanContext>(std::move(*context_result));
+      active_context = owned_vulkan_context.get();
+
+      initialize_after_context(std::filesystem::path(MR_RENDERER_LIB_SHADER_DIR));
+    }
+
+    void initialize_shared_context(const VulkanContext& ctx, uint32_t requested_width, uint32_t requested_height)
+    {
+      MR_TRACY_ZONE_N("KomputeInterop::initialize_shared_context");
+      owned_vulkan_context.reset();
+      // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast): WindowPresenter exposes const VulkanContext&
+      active_context = const_cast<VulkanContext*>(&ctx);
+      ensure_dimensions(requested_width, requested_height);
+
+      ASSERT(ctx.feature_support.dynamic_rendering, "dynamic rendering is required for this example");
+      if (ctx.has_present_queue()) {
+        ASSERT(
+          ctx.present_queue_family == ctx.graphics_queue_family,
+          "Kompute swapchain path requires present and graphics on the same queue family");
+      }
+
+      initialize_after_context(std::filesystem::path(MR_RENDERER_LIB_SHADER_DIR));
+    }
+
+    void initialize_after_context(const std::filesystem::path& shader_dir)
+    {
+      MR_TRACY_ZONE_N("KomputeInterop::initialize_after_context");
+      wire_context_pointers();
+
+      ASSERT(static_cast<bool>(graphics_queue), "failed to acquire graphics queue handle");
+      ASSERT(static_cast<bool>(kompute_queue), "failed to acquire compute queue handle");
+
+      kp_instance = std::shared_ptr<vk::Instance>(new vk::Instance(instance.instance), [](vk::Instance*) {});
+      kp_physical_device = std::shared_ptr<vk::PhysicalDevice>(
+        new vk::PhysicalDevice(physical_device.physical_device),
+        [](vk::PhysicalDevice*) {});
+      kp_device = std::shared_ptr<vk::Device>(new vk::Device(device.device), [](vk::Device*) {});
+      kp_kompute_queue = std::shared_ptr<vk::Queue>(new vk::Queue(kompute_queue), [](vk::Queue*) {});
+
+      frame_recorder = std::make_unique<FrameRecorder>(vulkan_ctx_mut());
+
+      vk::CommandPoolCreateInfo transient_info{};
+      transient_info.queueFamilyIndex = graphics_queue_family;
+      transient_info.flags = vk::CommandPoolCreateFlagBits::eTransient;
+      gfx_transient_pool =
+        vk_expect(vk::Device(device.device).createCommandPool(transient_info), "createCommandPool(transient gfx) failed");
+
+      create_static_mesh_buffers();
+      create_or_resize_color_image();
+      ensure_graphics_pipeline_for_format(shader_dir / "interop_raster.slang", vk::Format::eR8G8B8A8Unorm);
+      initialize_kompute(shader_dir / "interop_indirect_copy.slang");
+    }
+
+    Frame render_cpu_target(uint32_t frame_index, CpuTarget cpu_target)
+    {
+      MR_TRACY_ZONE_N("KomputeInterop::render_cpu_target");
+      MR_TRACY_FRAME("kompute_interop_frame_cpu");
+      const auto w = static_cast<uint32_t>(cpu_target.pixels.extent(1));
+      const auto h = static_cast<uint32_t>(cpu_target.pixels.extent(0));
+      ensure_dimensions(w, h);
+      color_image.emplace(
+        vulkan_ctx_mut(),
+        vk::Extent3D{.width = width, .height = height, .depth = 1u},
+        vk::Format::eR8G8B8A8Unorm);
+      ensure_graphics_pipeline_for_format(
+        std::filesystem::path(MR_RENDERER_LIB_SHADER_DIR) / "interop_raster.slang",
+        vk::Format::eR8G8B8A8Unorm);
+
       if (compute_sequence->isRunning()) {
         compute_sequence->evalAwait();
       }
@@ -475,7 +702,8 @@ namespace mr {
         .writes = false,
       });
       ASSERT(color_image.has_value(), "color attachment image is not initialized");
-      const auto& color = color_image.value();
+      // NOLINTNEXTLINE(bugprone-unchecked-optional-access): guarded by ASSERT(has_value)
+      const auto& color = *color_image;
       vk::ImageSubresourceRange color_range{};
       color_range.aspectMask = vk::ImageAspectFlagBits::eColor;
       color_range.baseMipLevel = 0;
@@ -491,7 +719,7 @@ namespace mr {
         .writes = true,
       });
 
-      record_graphics_command_buffer(recorded.handle);
+      record_offscreen_raster(recorded.handle);
       auto end_result = frame_recorder->end_recording(recorded);
       ASSERT(end_result.has_value(), "FrameRecorder::end_recording failed", end_result.error());
       frame_recorder->enqueue_for_submit(recorded);
@@ -508,21 +736,145 @@ namespace mr {
         ASSERT(vk::Device(device.device).waitSemaphores(wait_info, UINT64_MAX) == vk::Result::eSuccess,
           "waitSemaphores(frame recorder completion) failed");
       }
-      ASSERT(color_image.has_value(), "color attachment image is not initialized");
+
+      readback_rgba8_unorm_image_to_raster(
+        vulkan_ctx_mut(),
+        color.image(),
+        vk::ImageLayout::eTransferSrcOptimal,
+        width,
+        height,
+        cpu_target.pixels);
+
+      CpuFrame cpu_frame{};
+      cpu_frame.width = width;
+      cpu_frame.height = height;
+      cpu_frame.presenter_slot_id = cpu_target.presenter_slot_id;
+      cpu_frame.presenter_generation = cpu_target.presenter_generation;
+      return Frame{frame_index, std::move(cpu_frame)};
+    }
+
+    // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+    Frame render_gpu_target(uint32_t frame_index, GpuTarget gt)
+    {
+      MR_TRACY_ZONE_N("KomputeInterop::render_gpu_target");
+      MR_TRACY_FRAME("kompute_interop_frame_gpu");
+      ASSERT(gt.context == &vulkan_ctx(), "GpuTarget VulkanContext mismatch");
+      ASSERT(gt.image, "GpuTarget image is null");
+      ASSERT(gt.view, "GpuTarget view is null");
+      ASSERT(static_cast<bool>(gt.acquire_semaphore), "GpuTarget acquire semaphore is null");
+      ASSERT(static_cast<bool>(gt.render_finished_semaphore), "GpuTarget render_finished semaphore is null");
+
+      ensure_dimensions(gt.extent.width, gt.extent.height);
+
+      const std::filesystem::path shader_path =
+        std::filesystem::path(MR_RENDERER_LIB_SHADER_DIR) / "interop_raster.slang";
+      ensure_graphics_pipeline_for_format(shader_path, gt.format);
+
+      if (compute_sequence->isRunning()) {
+        compute_sequence->evalAwait();
+      }
+      compute_sequence->eval();
+
+      ASSERT(kompute_queue.waitIdle() == vk::Result::eSuccess, "kompute queue waitIdle failed");
+
+      ASSERT(
+        vk::Device(device.device).resetCommandPool(gfx_transient_pool) == vk::Result::eSuccess,
+        "resetCommandPool(transient) failed");
+
+      vk::CommandBufferAllocateInfo alloc_info{};
+      alloc_info.commandPool = gfx_transient_pool;
+      alloc_info.level = vk::CommandBufferLevel::ePrimary;
+      alloc_info.commandBufferCount = 1;
+      vk::CommandBuffer cmd =
+        vk_expect(vk::Device(device.device).allocateCommandBuffers(alloc_info), "allocate transient cmd failed").front();
+
+      vk::CommandBufferBeginInfo begin_info{};
+      begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+      ASSERT(cmd.begin(begin_info) == vk::Result::eSuccess, "transient cmd begin failed");
+
+      vk::ImageMemoryBarrier to_attachment{};
+      to_attachment.oldLayout = vk::ImageLayout::eUndefined;
+      to_attachment.newLayout = vk::ImageLayout::eColorAttachmentOptimal;
+      to_attachment.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+      to_attachment.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+      to_attachment.image = gt.image;
+      to_attachment.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+      to_attachment.subresourceRange.levelCount = 1;
+      to_attachment.subresourceRange.layerCount = 1;
+      to_attachment.srcAccessMask = {};
+      to_attachment.dstAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
+      cmd.pipelineBarrier(
+        vk::PipelineStageFlagBits::eTopOfPipe,
+        vk::PipelineStageFlagBits::eColorAttachmentOutput,
+        vk::DependencyFlags{},
+        {},
+        {},
+        to_attachment);
+
+      vk::RenderingAttachmentInfo attach{};
+      attach.imageView = gt.view;
+      attach.imageLayout = vk::ImageLayout::eColorAttachmentOptimal;
+      attach.loadOp = vk::AttachmentLoadOp::eClear;
+      attach.storeOp = vk::AttachmentStoreOp::eStore;
+      attach.clearValue = vk::ClearColorValue(std::array<float, 4>{0.05f, 0.05f, 0.1f, 1.0f});
+
+      record_indirect_copy_and_raster(cmd, attach, gt.extent);
+
+      vk::ImageMemoryBarrier to_present{};
+      to_present.oldLayout = vk::ImageLayout::eColorAttachmentOptimal;
+      to_present.newLayout = vk::ImageLayout::ePresentSrcKHR;
+      to_present.srcQueueFamilyIndex = vk::QueueFamilyIgnored;
+      to_present.dstQueueFamilyIndex = vk::QueueFamilyIgnored;
+      to_present.image = gt.image;
+      to_present.subresourceRange.aspectMask = vk::ImageAspectFlagBits::eColor;
+      to_present.subresourceRange.levelCount = 1;
+      to_present.subresourceRange.layerCount = 1;
+      to_present.srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite;
+      to_present.dstAccessMask = vk::AccessFlagBits::eMemoryRead;
+      cmd.pipelineBarrier(
+        vk::PipelineStageFlagBits::eColorAttachmentOutput,
+        vk::PipelineStageFlagBits::eBottomOfPipe,
+        vk::DependencyFlags{},
+        {},
+        {},
+        to_present);
+
+      ASSERT(cmd.end() == vk::Result::eSuccess, "transient cmd end failed");
+
+      vk::SubmitInfo submit_info{};
+      submit_info.waitSemaphoreCount = 1;
+      submit_info.pWaitSemaphores = &gt.acquire_semaphore;
+      submit_info.pWaitDstStageMask = &gt.acquire_stage;
+      submit_info.commandBufferCount = 1;
+      submit_info.pCommandBuffers = &cmd;
+      submit_info.signalSemaphoreCount = 1;
+      submit_info.pSignalSemaphores = &gt.render_finished_semaphore;
+      ASSERT(graphics_queue.submit(submit_info, vk::Fence{}) == vk::Result::eSuccess, "graphics submit(swapchain) failed");
+
+      ASSERT(graphics_queue.waitIdle() == vk::Result::eSuccess, "graphics queue must be idle before freeing submit cmd");
+
+      vk::Device(device.device).freeCommandBuffers(gfx_transient_pool, cmd);
+
       GpuFrame gpu_frame{};
-      gpu_frame.context = vulkan_context.get();
-      gpu_frame.width = width;
-      gpu_frame.height = height;
-      gpu_frame.image = color.image();
-      gpu_frame.layout = vk::ImageLayout::eTransferSrcOptimal;
-      gpu_frame.format = vk::Format::eR8G8B8A8Unorm;
+      gpu_frame.context = gt.context;
+      gpu_frame.width = gt.extent.width;
+      gpu_frame.height = gt.extent.height;
+      gpu_frame.image = gt.image;
+      gpu_frame.layout = vk::ImageLayout::ePresentSrcKHR;
+      gpu_frame.format = gt.format;
+      gpu_frame.presenter_slot_id = gt.slot_id;
+      gpu_frame.presenter_generation = gt.generation;
+      gpu_frame.render_finished_semaphore = gt.render_finished_semaphore;
       return Frame{frame_index, gpu_frame};
     }
 
     void shutdown()
     {
       MR_TRACY_ZONE_N("KomputeInterop::shutdown");
-      if (vulkan_context && device.device != VK_NULL_HANDLE) {
+      if (owned_vulkan_context && device.device != VK_NULL_HANDLE) {
+        ASSERT(vk::Device(device.device).waitIdle() == vk::Result::eSuccess, "vk::Device::waitIdle failed");
+      }
+      if (!owned_vulkan_context && device.device != VK_NULL_HANDLE) {
         ASSERT(vk::Device(device.device).waitIdle() == vk::Result::eSuccess, "vk::Device::waitIdle failed");
       }
       if (compute_sequence && compute_sequence->isRunning()) {
@@ -539,7 +891,13 @@ namespace mr {
       kp_instance.reset();
       frame_recorder.reset();
 
+      if (gfx_transient_pool && device.device != VK_NULL_HANDLE) {
+        vk::Device(device.device).destroyCommandPool(gfx_transient_pool);
+      }
+      gfx_transient_pool = nullptr;
+
       graphics_pipeline = {};
+      graphics_pipeline_format = vk::Format::eUndefined;
       color_image.reset();
       index_buffer = {};
       vertex_buffer = {};
@@ -549,7 +907,8 @@ namespace mr {
       device = {};
       physical_device = {};
       instance = {};
-      vulkan_context.reset();
+      owned_vulkan_context.reset();
+      active_context = nullptr;
     }
   };
 
@@ -557,21 +916,45 @@ namespace mr {
     : impl_(std::make_unique<Impl>())
   {
     MR_TRACY_ZONE;
-    impl_->initialize(width, height);
+    impl_->initialize_owned(width, height);
+  }
+
+  KomputeGraphicsInteropRenderer::KomputeGraphicsInteropRenderer(
+    const VulkanContext& shared_context,
+    uint32_t width,
+    uint32_t height)
+    : impl_(std::make_unique<Impl>())
+  {
+    MR_TRACY_ZONE;
+    impl_->initialize_shared_context(shared_context, width, height);
   }
 
   KomputeGraphicsInteropRenderer::~KomputeGraphicsInteropRenderer() = default;
-  KomputeGraphicsInteropRenderer::KomputeGraphicsInteropRenderer(KomputeGraphicsInteropRenderer&&) noexcept =
-    default;
+  KomputeGraphicsInteropRenderer::KomputeGraphicsInteropRenderer(KomputeGraphicsInteropRenderer&&) noexcept = default;
   KomputeGraphicsInteropRenderer&
   KomputeGraphicsInteropRenderer::operator=(KomputeGraphicsInteropRenderer&&) noexcept = default;
 
-  coro::generator<Frame> KomputeGraphicsInteropRenderer::frames()
+  const VulkanContext& KomputeGraphicsInteropRenderer::vulkan_context() const
+  {
+    ASSERT(impl_ != nullptr, "KomputeGraphicsInteropRenderer impl is null");
+    return impl_->vulkan_ctx();
+  }
+
+  coro::generator<Frame> KomputeGraphicsInteropRenderer::frames(coro::generator<Target> targets)
   {
     MR_TRACY_ZONE_N("KomputeInterop::frames");
-    uint32_t index = 0;
-    while (true) {
-      co_yield impl_->render_frame(index++);
+    ASSERT(impl_ != nullptr, "KomputeGraphicsInteropRenderer impl is null");
+    for (Target t : targets) {
+      co_yield std::visit(
+        [&](auto&& payload) -> Frame {
+          using U = std::decay_t<decltype(payload)>;
+          if constexpr (std::is_same_v<U, CpuTarget>) {
+            return impl_->render_cpu_target(t.index, payload);
+          } else {
+            return impl_->render_gpu_target(t.index, payload);
+          }
+        },
+        t.payload);
     }
   }
 } // namespace mr

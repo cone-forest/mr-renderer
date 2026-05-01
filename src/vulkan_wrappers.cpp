@@ -24,6 +24,7 @@ namespace mr {
   namespace {
     bool validation_enabled()
     {
+      MR_TRACY_ZONE_N("validation_enabled");
 #ifdef MR_RENDERER_ENABLE_VK_VALIDATION
       return true;
 #else
@@ -57,6 +58,7 @@ namespace mr {
 
     bool has_extension(const std::vector<std::string>& extensions, const char* extension_name)
     {
+      MR_TRACY_ZONE_N("has_extension");
       return std::ranges::any_of(extensions, [extension_name](const auto &ext) -> auto { return ext == extension_name; });
     }
 
@@ -65,6 +67,7 @@ namespace mr {
       uint32_t queue_family,
       VkSurfaceKHR surface)
     {
+      MR_TRACY_ZONE_N("queue_supports_present");
       if (surface == VK_NULL_HANDLE) {
         return false;
       }
@@ -176,6 +179,7 @@ namespace mr {
 
     size_t format_byte_size(vk::Format format)
     {
+      MR_TRACY_ZONE_N("format_byte_size");
       switch (format) {
       case vk::Format::eR8Unorm:
       case vk::Format::eR8Uint:
@@ -205,9 +209,10 @@ namespace mr {
     std::vector<vk::PipelineColorBlendAttachmentState>
     default_blend_attachments(uint32_t count)
     {
+      MR_TRACY_ZONE_N("default_blend_attachments");
       std::vector<vk::PipelineColorBlendAttachmentState> attachments(count);
       for (auto& attachment : attachments) {
-        attachment.blendEnable = false;
+        attachment.blendEnable = vk::False;
         attachment.srcColorBlendFactor = vk::BlendFactor::eOne;
         attachment.dstColorBlendFactor = vk::BlendFactor::eZero;
         attachment.colorBlendOp = vk::BlendOp::eAdd;
@@ -223,6 +228,7 @@ namespace mr {
 
     std::vector<std::byte> read_binary_file(const std::string& path)
     {
+      MR_TRACY_ZONE_N("read_binary_file");
       if (path.empty()) {
         return {};
       }
@@ -246,6 +252,7 @@ namespace mr {
 
     bool write_binary_file(const std::string& path, std::span<const std::byte> bytes)
     {
+      MR_TRACY_ZONE_N("write_binary_file");
       if (path.empty()) {
         return false;
       }
@@ -268,6 +275,7 @@ namespace mr {
     template <typename Fn>
     void immediate_submit(const VulkanContext& context, Fn&& record)
     {
+      MR_TRACY_ZONE_N("immediate_submit");
       vk::CommandPoolCreateInfo pool_info{};
       pool_info.queueFamilyIndex = context.graphics_queue_family;
       pool_info.flags = vk::CommandPoolCreateFlagBits::eTransient;
@@ -281,12 +289,12 @@ namespace mr {
       alloc_info.commandBufferCount = 1;
       const auto cmd_rv = context.vk_device().allocateCommandBuffers(alloc_info);
       ASSERT(cmd_rv.result == vk::Result::eSuccess, "allocateCommandBuffers failed");
-      vk::CommandBuffer cmd = cmd_rv.value[0];
+      vk::CommandBuffer cmd = cmd_rv.value.at(0);
 
       vk::CommandBufferBeginInfo begin_info{};
       begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
       ASSERT(cmd.begin(begin_info) == vk::Result::eSuccess, "command buffer begin failed");
-      record(cmd);
+      std::forward<Fn>(record)(cmd);
       ASSERT(cmd.end() == vk::Result::eSuccess, "command buffer end failed");
 
       vk::SubmitInfo submit_info{};
@@ -298,10 +306,151 @@ namespace mr {
       context.vk_device().freeCommandBuffers(pool, cmd);
       context.vk_device().destroyCommandPool(pool);
     }
+
+    // NOLINTNEXTLINE(readability-function-cognitive-complexity)
+    std::expected<VulkanContext, std::string> build_vulkan_context_from_instance(
+      const VulkanContextCreateInfo& create_info,
+      vkb::Instance instance)
+    {
+      MR_TRACY_ZONE_N("build_vulkan_context_from_instance");
+      VulkanContext context{};
+      context.instance = instance;
+
+      vkb::PhysicalDeviceSelector selector(context.instance, create_info.surface);
+      selector.require_present(create_info.require_present);
+      if (!create_info.headless || create_info.require_present) {
+        selector.add_required_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+      }
+      auto physical_result = selector.select();
+      if (!physical_result.has_value()) {
+        return std::unexpected("vk-bootstrap failed to select a Vulkan physical device");
+      }
+      context.physical_device = physical_result.value();
+      context.feature_support = query_feature_support(context.physical_device);
+      enable_optional_features(context.physical_device, context.feature_support);
+      context.enabled_extensions = context.physical_device.get_extensions();
+
+      const auto queue_props = context.physical_device.get_queue_families();
+      if (queue_props.empty()) {
+        return std::unexpected("selected physical device has no queue families");
+      }
+
+      auto queue_has_flags = [&](uint32_t family, vk::QueueFlags required_flags) -> bool {
+        if (family >= queue_props.size()) {
+          return false;
+        }
+        const vk::QueueFlags flags{queue_props.at(family).queueFlags};
+        return (flags & required_flags) == required_flags;
+      };
+
+      for (uint32_t i = 0; i < queue_props.size(); ++i) {
+        if (queue_has_flags(
+              i,
+              vk::QueueFlagBits::eGraphics | vk::QueueFlagBits::eCompute | vk::QueueFlagBits::eTransfer)) {
+          context.graphics_queue_family = i;
+          break;
+        }
+      }
+      if (context.graphics_queue_family == std::numeric_limits<uint32_t>::max()) {
+        return std::unexpected("no queue family satisfies graphics+compute+transfer");
+      }
+
+      if (create_info.require_present) {
+        for (uint32_t i = 0; i < queue_props.size(); ++i) {
+          if (queue_supports_present(context.physical_device.physical_device, i, create_info.surface)) {
+            context.present_queue_family = i;
+            break;
+          }
+        }
+        if (context.present_queue_family == std::numeric_limits<uint32_t>::max()) {
+          return std::unexpected("no queue family supports presentation for the provided surface");
+        }
+      }
+
+      if (create_info.prefer_dedicated_compute_queue) {
+        for (uint32_t i = 0; i < queue_props.size(); ++i) {
+          const vk::QueueFlags flags{queue_props.at(i).queueFlags};
+          const bool is_compute = (flags & vk::QueueFlagBits::eCompute) == vk::QueueFlagBits::eCompute;
+          const bool is_transfer = (flags & vk::QueueFlagBits::eTransfer) == vk::QueueFlagBits::eTransfer;
+          const bool is_graphics = (flags & vk::QueueFlagBits::eGraphics) == vk::QueueFlagBits::eGraphics;
+          if (is_compute && is_transfer && !is_graphics) {
+            context.compute_queue_family = i;
+            break;
+          }
+        }
+      }
+      if (context.compute_queue_family == std::numeric_limits<uint32_t>::max()) {
+        context.compute_queue_family = context.graphics_queue_family;
+      }
+      if (!queue_has_flags(
+            context.compute_queue_family,
+            vk::QueueFlagBits::eCompute | vk::QueueFlagBits::eTransfer)) {
+        return std::unexpected("selected compute queue family does not satisfy compute+transfer");
+      }
+
+      std::set<uint32_t> unique_families{};
+      unique_families.insert(context.graphics_queue_family);
+      unique_families.insert(context.compute_queue_family);
+      if (create_info.require_present) {
+        unique_families.insert(context.present_queue_family);
+      }
+
+      std::vector<vkb::CustomQueueDescription> queue_setup{};
+      queue_setup.reserve(unique_families.size());
+      for (const uint32_t family : unique_families) {
+        queue_setup.emplace_back(family, std::vector<float>{1.0f});
+      }
+
+      vkb::DeviceBuilder device_builder(context.physical_device);
+      device_builder.custom_queue_setup(queue_setup);
+      auto device_result = device_builder.build();
+      if (!device_result.has_value()) {
+        return std::unexpected("vk-bootstrap failed to create Vulkan logical device");
+      }
+      context.device = device_result.value();
+
+      const vk::Device device = context.vk_device();
+      context.graphics_queue = device.getQueue(context.graphics_queue_family, 0);
+      context.compute_queue = device.getQueue(context.compute_queue_family, 0);
+      if (!context.graphics_queue || !context.compute_queue) {
+        return std::unexpected("failed to fetch graphics/compute queue handles");
+      }
+      if (create_info.require_present) {
+        context.present_queue = device.getQueue(context.present_queue_family, 0);
+        if (!context.present_queue) {
+          return std::unexpected("failed to fetch present queue handle");
+        }
+      }
+
+      VmaAllocatorCreateInfo allocator_info{};
+      allocator_info.physicalDevice = context.physical_device.physical_device;
+      allocator_info.device = context.device.device;
+      allocator_info.instance = context.instance.instance;
+      const VkResult allocator_result = vmaCreateAllocator(&allocator_info, &context.allocator);
+      if (allocator_result != VK_SUCCESS) {
+        return std::unexpected("vmaCreateAllocator failed");
+      }
+
+      if (create_info.enable_pipeline_cache) {
+        context.pipeline_cache_path = create_info.pipeline_cache_path;
+        const auto cache_bytes = read_binary_file(create_info.pipeline_cache_path);
+        vk::PipelineCacheCreateInfo cache_create_info{};
+        cache_create_info.initialDataSize = cache_bytes.size();
+        cache_create_info.pInitialData = cache_bytes.empty() ? nullptr : cache_bytes.data();
+        const auto cache_result = context.vk_device().createPipelineCache(cache_create_info);
+        if (cache_result.result != vk::Result::eSuccess) {
+          return std::unexpected("createPipelineCache failed");
+        }
+        context.pipeline_cache = cache_result.value;
+      }
+
+      return context;
+    }
   } // namespace
 
   VulkanContext::~VulkanContext()
   {
+    MR_TRACY_ZONE_N("VulkanContext::~VulkanContext");
     flush_pipeline_cache();
     if (pipeline_cache) {
       vk_device().destroyPipelineCache(pipeline_cache);
@@ -337,6 +486,7 @@ namespace mr {
     , pipeline_cache(other.pipeline_cache)
     , pipeline_cache_path(std::move(other.pipeline_cache_path))
   {
+    MR_TRACY_ZONE_N("VulkanContext::VulkanContext(move)");
     other.instance = {};
     other.device = {};
     other.allocator = VK_NULL_HANDLE;
@@ -351,6 +501,7 @@ namespace mr {
 
   VulkanContext& VulkanContext::operator=(VulkanContext&& other) noexcept
   {
+    MR_TRACY_ZONE_N("VulkanContext::operator=(move)");
     if (this == &other) {
       return *this;
     }
@@ -400,17 +551,35 @@ namespace mr {
     return *this;
   }
 
-  vk::Instance VulkanContext::vk_instance() const { return instance.instance; }
-  vk::PhysicalDevice VulkanContext::vk_physical_device() const { return physical_device.physical_device; }
-  vk::Device VulkanContext::vk_device() const { return device.device; }
+  vk::Instance VulkanContext::vk_instance() const
+  {
+    MR_TRACY_ZONE_N("VulkanContext::vk_instance");
+    return instance.instance;
+  }
+  vk::PhysicalDevice VulkanContext::vk_physical_device() const
+  {
+    MR_TRACY_ZONE_N("VulkanContext::vk_physical_device");
+    return physical_device.physical_device;
+  }
+  vk::Device VulkanContext::vk_device() const
+  {
+    MR_TRACY_ZONE_N("VulkanContext::vk_device");
+    return device.device;
+  }
   bool VulkanContext::has_present_queue() const
   {
+    MR_TRACY_ZONE_N("VulkanContext::has_present_queue");
     return present_queue_family != std::numeric_limits<uint32_t>::max() && static_cast<bool>(present_queue);
   }
-  vk::PipelineCache VulkanContext::vk_pipeline_cache() const { return pipeline_cache; }
+  vk::PipelineCache VulkanContext::vk_pipeline_cache() const
+  {
+    MR_TRACY_ZONE_N("VulkanContext::vk_pipeline_cache");
+    return pipeline_cache;
+  }
 
   void VulkanContext::flush_pipeline_cache() const
   {
+    MR_TRACY_ZONE_N("VulkanContext::flush_pipeline_cache");
     if (!pipeline_cache || pipeline_cache_path.empty() || device.device == VK_NULL_HANDLE) {
       return;
     }
@@ -422,151 +591,47 @@ namespace mr {
     static_cast<void>(write_binary_file(pipeline_cache_path, bytes));
   }
 
+  std::expected<vkb::Instance, std::string> create_vulkan_instance(
+    const char* app_name,
+    bool headless,
+    std::span<const char* const> extensions)
+  {
+    MR_TRACY_ZONE_N("create_vulkan_instance");
+    std::vector<const char*> instance_ext{};
+    instance_ext.reserve(extensions.size());
+    for (const char* const ext : extensions) {
+      instance_ext.push_back(ext);
+    }
+    return create_instance(app_name, headless, instance_ext);
+  }
+
   std::expected<VulkanContext, std::string> create_vulkan_context(const VulkanContextCreateInfo& create_info)
   {
     MR_TRACY_ZONE_N("create_vulkan_context");
-    auto instance_result = create_instance(create_info.app_name, create_info.headless, {});
+    std::vector<const char*> instance_ext{};
+    instance_ext.reserve(create_info.instance_extensions.size());
+    for (const char* const ext : create_info.instance_extensions) {
+      instance_ext.push_back(ext);
+    }
+    auto instance_result = create_instance(create_info.app_name, create_info.headless, instance_ext);
     if (!instance_result.has_value()) {
       return std::unexpected(instance_result.error());
     }
+    return build_vulkan_context_from_instance(create_info, instance_result.value());
+  }
 
-    VulkanContext context{};
-    context.instance = *instance_result;
-
-    vkb::PhysicalDeviceSelector selector(context.instance, create_info.surface);
-    selector.require_present(create_info.require_present);
-    if (!create_info.headless || create_info.require_present) {
-      selector.add_required_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-    }
-    auto physical_result = selector.select();
-    if (!physical_result.has_value()) {
-      return std::unexpected("vk-bootstrap failed to select a Vulkan physical device");
-    }
-    context.physical_device = physical_result.value();
-    context.feature_support = query_feature_support(context.physical_device);
-    enable_optional_features(context.physical_device, context.feature_support);
-    context.enabled_extensions = context.physical_device.get_extensions();
-
-    const auto queue_props = context.physical_device.get_queue_families();
-    if (queue_props.empty()) {
-      return std::unexpected("selected physical device has no queue families");
-    }
-
-    auto queue_has_flags = [&](uint32_t family, vk::QueueFlags required_flags) -> bool {
-      if (family >= queue_props.size()) {
-        return false;
-      }
-      const vk::QueueFlags flags{queue_props[family].queueFlags};
-      return (flags & required_flags) == required_flags;
-    };
-
-    for (uint32_t i = 0; i < queue_props.size(); ++i) {
-      if (queue_has_flags(
-            i,
-            vk::QueueFlagBits::eGraphics | vk::QueueFlagBits::eCompute | vk::QueueFlagBits::eTransfer)) {
-        context.graphics_queue_family = i;
-        break;
-      }
-    }
-    if (context.graphics_queue_family == std::numeric_limits<uint32_t>::max()) {
-      return std::unexpected("no queue family satisfies graphics+compute+transfer");
-    }
-
-    if (create_info.require_present) {
-      for (uint32_t i = 0; i < queue_props.size(); ++i) {
-        if (queue_supports_present(context.physical_device.physical_device, i, create_info.surface)) {
-          context.present_queue_family = i;
-          break;
-        }
-      }
-      if (context.present_queue_family == std::numeric_limits<uint32_t>::max()) {
-        return std::unexpected("no queue family supports presentation for the provided surface");
-      }
-    }
-
-    if (create_info.prefer_dedicated_compute_queue) {
-      for (uint32_t i = 0; i < queue_props.size(); ++i) {
-        const vk::QueueFlags flags{queue_props[i].queueFlags};
-        const bool is_compute = (flags & vk::QueueFlagBits::eCompute) == vk::QueueFlagBits::eCompute;
-        const bool is_transfer = (flags & vk::QueueFlagBits::eTransfer) == vk::QueueFlagBits::eTransfer;
-        const bool is_graphics = (flags & vk::QueueFlagBits::eGraphics) == vk::QueueFlagBits::eGraphics;
-        if (is_compute && is_transfer && !is_graphics) {
-          context.compute_queue_family = i;
-          break;
-        }
-      }
-    }
-    if (context.compute_queue_family == std::numeric_limits<uint32_t>::max()) {
-      context.compute_queue_family = context.graphics_queue_family;
-    }
-    if (!queue_has_flags(
-          context.compute_queue_family,
-          vk::QueueFlagBits::eCompute | vk::QueueFlagBits::eTransfer)) {
-      return std::unexpected("selected compute queue family does not support compute+transfer");
-    }
-
-    std::set<uint32_t> unique_families{};
-    unique_families.insert(context.graphics_queue_family);
-    unique_families.insert(context.compute_queue_family);
-    if (create_info.require_present) {
-      unique_families.insert(context.present_queue_family);
-    }
-
-    std::vector<vkb::CustomQueueDescription> queue_setup{};
-    queue_setup.reserve(unique_families.size());
-    for (const uint32_t family : unique_families) {
-      queue_setup.emplace_back(family, std::vector<float>{1.0f});
-    }
-
-    vkb::DeviceBuilder device_builder(context.physical_device);
-    device_builder.custom_queue_setup(queue_setup);
-    auto device_result = device_builder.build();
-    if (!device_result.has_value()) {
-      return std::unexpected("vk-bootstrap failed to create Vulkan logical device");
-    }
-    context.device = device_result.value();
-
-    const vk::Device device = context.vk_device();
-    context.graphics_queue = device.getQueue(context.graphics_queue_family, 0);
-    context.compute_queue = device.getQueue(context.compute_queue_family, 0);
-    if (!context.graphics_queue || !context.compute_queue) {
-      return std::unexpected("failed to fetch graphics/compute queue handles");
-    }
-    if (create_info.require_present) {
-      context.present_queue = device.getQueue(context.present_queue_family, 0);
-      if (!context.present_queue) {
-        return std::unexpected("failed to fetch present queue handle");
-      }
-    }
-
-    VmaAllocatorCreateInfo allocator_info{};
-    allocator_info.physicalDevice = context.physical_device.physical_device;
-    allocator_info.device = context.device.device;
-    allocator_info.instance = context.instance.instance;
-    const VkResult allocator_result = vmaCreateAllocator(&allocator_info, &context.allocator);
-    if (allocator_result != VK_SUCCESS) {
-      return std::unexpected("vmaCreateAllocator failed");
-    }
-
-    if (create_info.enable_pipeline_cache) {
-      context.pipeline_cache_path = create_info.pipeline_cache_path;
-      const auto cache_bytes = read_binary_file(context.pipeline_cache_path);
-      vk::PipelineCacheCreateInfo cache_create_info{};
-      cache_create_info.initialDataSize = cache_bytes.size();
-      cache_create_info.pInitialData = cache_bytes.empty() ? nullptr : cache_bytes.data();
-      const auto cache_result = context.vk_device().createPipelineCache(cache_create_info);
-      if (cache_result.result != vk::Result::eSuccess) {
-        return std::unexpected("createPipelineCache failed");
-      }
-      context.pipeline_cache = cache_result.value;
-    }
-
-    return context;
+  std::expected<VulkanContext, std::string> create_vulkan_context(
+    const VulkanContextCreateInfo& create_info,
+    vkb::Instance instance)
+  {
+    MR_TRACY_ZONE_N("create_vulkan_context(instance)");
+    return build_vulkan_context_from_instance(create_info, instance);
   }
 
   std::expected<std::vector<VulkanPhysicalDeviceInfo>, std::string>
   enumerate_vulkan_physical_devices()
   {
+    MR_TRACY_ZONE_N("enumerate_vulkan_physical_devices");
     auto instance_ret = create_instance("mr-renderer-lib", true, {});
     if (!instance_ret) {
       return std::unexpected(instance_ret.error());
@@ -599,7 +664,7 @@ namespace mr {
     out.reserve(device_count);
     for (uint32_t i = 0; i < device_count; ++i) {
       VkPhysicalDeviceProperties props{};
-      vkGetPhysicalDeviceProperties(devices[i], &props);
+      vkGetPhysicalDeviceProperties(devices.at(i), &props);
       out.push_back(VulkanPhysicalDeviceInfo{
         .vendor_id = props.vendorID,
         .device_type = props.deviceType,
@@ -619,6 +684,7 @@ namespace mr {
     , size_(byte_size)
     , usage_flags_(usage_flags)
   {
+    MR_TRACY_ZONE_N("Buffer::Buffer");
     vk::BufferCreateInfo buffer_create_info{};
     buffer_create_info.size = byte_size;
     buffer_create_info.usage = usage_flags;
@@ -643,6 +709,7 @@ namespace mr {
 
   Buffer::~Buffer() noexcept
   {
+    MR_TRACY_ZONE_N("Buffer::~Buffer");
     if (buffer_ && context_ != nullptr && context_->allocator != VK_NULL_HANDLE) {
       vmaDestroyBuffer(context_->allocator, static_cast<VkBuffer>(buffer_), allocation_);
       buffer_ = nullptr;
@@ -650,10 +717,15 @@ namespace mr {
     }
   }
 
-  Buffer::Buffer(Buffer&& other) noexcept { *this = std::move(other); }
+  Buffer::Buffer(Buffer&& other) noexcept
+  {
+    MR_TRACY_ZONE_N("Buffer::Buffer(move)");
+    *this = std::move(other);
+  }
 
   Buffer& Buffer::operator=(Buffer&& other) noexcept
   {
+    MR_TRACY_ZONE_N("Buffer::operator=(move)");
     if (this == &other) {
       return *this;
     }
@@ -676,11 +748,20 @@ namespace mr {
 
   const VulkanContext& Buffer::context() const
   {
+    MR_TRACY_ZONE_N("Buffer::context");
     ASSERT(context_ != nullptr, "buffer context is null");
     return *context_;
   }
-  vk::Buffer Buffer::buffer() const noexcept { return buffer_; }
-  vk::DeviceSize Buffer::byte_size() const noexcept { return size_; }
+  vk::Buffer Buffer::buffer() const noexcept
+  {
+    MR_TRACY_ZONE_N("Buffer::buffer");
+    return buffer_;
+  }
+  vk::DeviceSize Buffer::byte_size() const noexcept
+  {
+    MR_TRACY_ZONE_N("Buffer::byte_size");
+    return size_;
+  }
 
   HostBuffer::HostBuffer(
     const VulkanContext& context,
@@ -693,10 +774,13 @@ namespace mr {
         usage_flags,
         memory_properties | vk::MemoryPropertyFlagBits::eHostVisible |
           vk::MemoryPropertyFlagBits::eHostCoherent)
-  {}
+  {
+    MR_TRACY_ZONE_N("HostBuffer::HostBuffer");
+  }
 
   HostBuffer::~HostBuffer() noexcept
   {
+    MR_TRACY_ZONE_N("HostBuffer::~HostBuffer");
     if (mapped_data_ != nullptr && context_ != nullptr) {
       vmaUnmapMemory(context_->allocator, allocation_);
       mapped_data_ = nullptr;
@@ -704,14 +788,15 @@ namespace mr {
   }
 
   HostBuffer::HostBuffer(HostBuffer&& other) noexcept
-    : Buffer(std::move(other))
-    , mapped_data_(other.mapped_data_)
+    : Buffer(static_cast<Buffer&&>(other))
+    , mapped_data_(std::exchange(other.mapped_data_, nullptr))
   {
-    other.mapped_data_ = nullptr;
+    MR_TRACY_ZONE_N("HostBuffer::HostBuffer(move)");
   }
 
   HostBuffer& HostBuffer::operator=(HostBuffer&& other) noexcept
   {
+    MR_TRACY_ZONE_N("HostBuffer::operator=(move)");
     if (this == &other) {
       return *this;
     }
@@ -719,14 +804,16 @@ namespace mr {
       vmaUnmapMemory(context_->allocator, allocation_);
       mapped_data_ = nullptr;
     }
-    Buffer::operator=(std::move(other));
-    mapped_data_ = other.mapped_data_;
+    void* const stolen_mapped = other.mapped_data_;
     other.mapped_data_ = nullptr;
+    Buffer::operator=(std::move(other));
+    mapped_data_ = stolen_mapped;
     return *this;
   }
 
   std::span<const std::byte> HostBuffer::read() noexcept
   {
+    MR_TRACY_ZONE_N("HostBuffer::read");
     if (mapped_data_ == nullptr) {
       const VkResult result = vmaMapMemory(context_->allocator, allocation_, &mapped_data_);
       ASSERT(result == VK_SUCCESS, "vmaMapMemory failed", static_cast<int>(result));
@@ -736,6 +823,7 @@ namespace mr {
 
   std::vector<std::byte> HostBuffer::copy() noexcept
   {
+    MR_TRACY_ZONE_N("HostBuffer::copy");
     std::vector<std::byte> data(static_cast<size_t>(size_));
     auto src = read();
     std::memcpy(data.data(), src.data(), src.size());
@@ -744,6 +832,7 @@ namespace mr {
 
   HostBuffer& HostBuffer::write(std::span<const std::byte> src)
   {
+    MR_TRACY_ZONE_N("HostBuffer::write");
     ASSERT(src.size() <= static_cast<size_t>(size_), "host buffer overflow write");
     if (mapped_data_ == nullptr) {
       const VkResult result = vmaMapMemory(context_->allocator, allocation_, &mapped_data_);
@@ -763,10 +852,13 @@ namespace mr {
     vk::BufferUsageFlags usage_flags,
     vk::MemoryPropertyFlags memory_properties)
     : Buffer(context, byte_size, usage_flags, memory_properties | vk::MemoryPropertyFlagBits::eDeviceLocal)
-  {}
+  {
+    MR_TRACY_ZONE_N("DeviceBuffer::DeviceBuffer");
+  }
 
   DeviceBuffer& DeviceBuffer::resize(vk::CommandBuffer command_buffer, vk::DeviceSize new_size) noexcept
   {
+    MR_TRACY_ZONE_N("DeviceBuffer::resize");
     DeviceBuffer resized(
       *context_,
       new_size,
@@ -785,6 +877,7 @@ namespace mr {
     std::span<const std::byte> src,
     vk::DeviceSize offset)
   {
+    MR_TRACY_ZONE_N("DeviceBuffer::write");
     ASSERT(offset + src.size() <= size_, "device buffer overflow write");
     HostBuffer staging(*context_, src.size(), vk::BufferUsageFlagBits::eTransferSrc);
     staging.write(src);
@@ -801,7 +894,9 @@ namespace mr {
     vk::DeviceSize byte_size,
     vk::BufferUsageFlags usage_flags)
     : HostBuffer(context, byte_size, usage_flags | vk::BufferUsageFlagBits::eUniformBuffer)
-  {}
+  {
+    MR_TRACY_ZONE_N("UniformBuffer::UniformBuffer");
+  }
 
   StorageBuffer::StorageBuffer(
     const VulkanContext& context,
@@ -811,14 +906,18 @@ namespace mr {
         context,
         byte_size,
         usage_flags | vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferDst)
-  {}
+  {
+    MR_TRACY_ZONE_N("StorageBuffer::StorageBuffer");
+  }
 
   VertexBuffer::VertexBuffer(const VulkanContext& context, vk::DeviceSize byte_size)
     : DeviceBuffer(
         context,
         byte_size,
         vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst)
-  {}
+  {
+    MR_TRACY_ZONE_N("VertexBuffer::VertexBuffer");
+  }
 
   IndexBuffer::IndexBuffer(const VulkanContext& context, vk::DeviceSize byte_size, vk::IndexType index_type)
     : DeviceBuffer(
@@ -826,7 +925,9 @@ namespace mr {
         byte_size,
         vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eTransferDst)
     , index_type_(index_type)
-  {}
+  {
+    MR_TRACY_ZONE_N("IndexBuffer::IndexBuffer");
+  }
 
   VectorBuffer::VectorBuffer(
     const VulkanContext& context,
@@ -837,10 +938,13 @@ namespace mr {
         initial_byte_size,
         usage_flags | vk::BufferUsageFlagBits::eTransferSrc,
         vk::MemoryPropertyFlags{})
-  {}
+  {
+    MR_TRACY_ZONE_N("VectorBuffer::VectorBuffer");
+  }
 
   vk::DeviceSize VectorBuffer::append_range(vk::CommandBuffer command_buffer, std::span<const std::byte> src) noexcept
   {
+    MR_TRACY_ZONE_N("VectorBuffer::append_range");
     const vk::DeviceSize offset = current_size_;
     current_size_ += src.size();
     if (current_size_ > byte_size()) {
@@ -859,7 +963,9 @@ namespace mr {
         context,
         vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst,
         initial_byte_size)
-  {}
+  {
+    MR_TRACY_ZONE_N("VertexVectorBuffer::VertexVectorBuffer");
+  }
 
   IndexVectorBuffer::IndexVectorBuffer(
     const VulkanContext& context,
@@ -868,7 +974,9 @@ namespace mr {
         context,
         vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eTransferDst,
         initial_byte_size)
-  {}
+  {
+    MR_TRACY_ZONE_N("IndexVectorBuffer::IndexVectorBuffer");
+  }
 
   DeviceHeapAllocator::AllocationBlock::AllocationBlock(
     vk::DeviceSize size,
@@ -878,6 +986,7 @@ namespace mr {
     , offset_(offset)
     , block_number_(block_number)
   {
+    MR_TRACY_ZONE_N("DeviceHeapAllocator::AllocationBlock::AllocationBlock");
     VmaVirtualBlockCreateInfo create_info{};
     create_info.size = size_;
     const VkResult result = vmaCreateVirtualBlock(&create_info, &virtual_block_);
@@ -886,6 +995,7 @@ namespace mr {
 
   DeviceHeapAllocator::AllocationBlock::~AllocationBlock() noexcept
   {
+    MR_TRACY_ZONE_N("DeviceHeapAllocator::AllocationBlock::~AllocationBlock");
     if (virtual_block_ != VK_NULL_HANDLE) {
       vmaClearVirtualBlock(virtual_block_);
       vmaDestroyVirtualBlock(virtual_block_);
@@ -895,12 +1005,14 @@ namespace mr {
 
   DeviceHeapAllocator::AllocationBlock::AllocationBlock(AllocationBlock&& other) noexcept
   {
+    MR_TRACY_ZONE_N("DeviceHeapAllocator::AllocationBlock::AllocationBlock(move)");
     *this = std::move(other);
   }
 
   DeviceHeapAllocator::AllocationBlock&
   DeviceHeapAllocator::AllocationBlock::operator=(AllocationBlock&& other) noexcept
   {
+    MR_TRACY_ZONE_N("DeviceHeapAllocator::AllocationBlock::operator=(move)");
     if (this == &other) {
       return *this;
     }
@@ -918,6 +1030,7 @@ namespace mr {
   std::optional<std::pair<vk::DeviceSize, DeviceHeapAllocator::Allocation>>
   DeviceHeapAllocator::AllocationBlock::allocate(vk::DeviceSize allocation_size, uint32_t alignment) noexcept
   {
+    MR_TRACY_ZONE_N("DeviceHeapAllocator::AllocationBlock::allocate");
     Allocation allocation{};
     allocation.byte_size = allocation_size;
     allocation.block_number = block_number_;
@@ -927,7 +1040,7 @@ namespace mr {
     alloc_info.alignment = alignment;
 
     vk::DeviceSize offset = 0;
-    std::lock_guard lock(mutex_);
+    std::scoped_lock lock(mutex_);
     const VkResult result = vmaVirtualAllocate(virtual_block_, &alloc_info, &allocation.allocation, &offset);
     if (result != VK_SUCCESS) {
       return std::nullopt;
@@ -937,7 +1050,8 @@ namespace mr {
 
   void DeviceHeapAllocator::AllocationBlock::deallocate(Allocation& allocation) noexcept
   {
-    std::lock_guard lock(mutex_);
+    MR_TRACY_ZONE_N("DeviceHeapAllocator::AllocationBlock::deallocate");
+    std::scoped_lock lock(mutex_);
     vmaVirtualFree(virtual_block_, allocation.allocation);
     allocation.allocation = VK_NULL_HANDLE;
   }
@@ -945,24 +1059,27 @@ namespace mr {
   DeviceHeapAllocator::DeviceHeapAllocator(vk::DeviceSize start_byte_size, uint32_t alignment)
     : alignment_(alignment)
   {
+    MR_TRACY_ZONE_N("DeviceHeapAllocator::DeviceHeapAllocator");
     ASSERT(std::has_single_bit(alignment), "allocator alignment must be power-of-two");
     add_block(start_byte_size);
   }
 
   DeviceHeapAllocator::DeviceHeapAllocator(DeviceHeapAllocator&& other) noexcept
   {
+    MR_TRACY_ZONE_N("DeviceHeapAllocator::DeviceHeapAllocator(move)");
     *this = std::move(other);
   }
 
   DeviceHeapAllocator& DeviceHeapAllocator::operator=(DeviceHeapAllocator&& other) noexcept
   {
+    MR_TRACY_ZONE_N("DeviceHeapAllocator::operator=(move)");
     if (this == &other) {
       return *this;
     }
     size_ = other.size_;
     alignment_ = other.alignment_;
     {
-      std::lock_guard lock(other.allocations_mutex_);
+      std::scoped_lock lock(other.allocations_mutex_);
       allocations_ = std::move(other.allocations_);
     }
     blocks_ = std::move(other.blocks_);
@@ -974,7 +1091,8 @@ namespace mr {
   DeviceHeapAllocator::AllocationBlock&
   DeviceHeapAllocator::add_block(vk::DeviceSize allocation_size) noexcept
   {
-    std::lock_guard lock(add_block_mutex_);
+    MR_TRACY_ZONE_N("DeviceHeapAllocator::add_block");
+    std::scoped_lock lock(add_block_mutex_);
     vk::DeviceSize block_size = allocation_size;
     vk::DeviceSize offset = 0;
     if (!blocks_.empty()) {
@@ -989,13 +1107,15 @@ namespace mr {
 
   DeviceHeapAllocator::AllocationInfo DeviceHeapAllocator::allocate(vk::DeviceSize request_size) noexcept
   {
+    MR_TRACY_ZONE_N("DeviceHeapAllocator::allocate");
     ASSERT(request_size % alignment_ == 0, "heap allocation must satisfy allocator alignment");
     std::pair<vk::DeviceSize, Allocation> allocation{};
     bool reused_existing = false;
     for (auto& block : blocks_) {
       auto result = block.allocate(request_size, alignment_);
       if (result.has_value()) {
-        allocation = std::move(*result);
+        // NOLINTNEXTLINE(bugprone-unchecked-optional-access): branch ensures has_value()
+        allocation = std::move(result.value());
         reused_existing = true;
         break;
       }
@@ -1003,10 +1123,11 @@ namespace mr {
     if (!reused_existing) {
       auto result = add_block(request_size).allocate(request_size, alignment_);
       ASSERT(result.has_value(), "allocation after block growth failed");
-      allocation = std::move(*result);
+      // NOLINTNEXTLINE(bugprone-unchecked-optional-access): guarded by ASSERT above
+      allocation = std::move(result.value());
     }
     {
-      std::lock_guard lock(allocations_mutex_);
+      std::scoped_lock lock(allocations_mutex_);
       allocations_.insert(allocation);
     }
     return AllocationInfo{
@@ -1017,12 +1138,13 @@ namespace mr {
 
   void DeviceHeapAllocator::deallocate(vk::DeviceSize offset) noexcept
   {
-    std::lock_guard lock(allocations_mutex_);
+    MR_TRACY_ZONE_N("DeviceHeapAllocator::deallocate");
+    std::scoped_lock lock(allocations_mutex_);
     const auto it = allocations_.find(offset);
     ASSERT(it != allocations_.end(), "double free or unknown heap offset", offset);
     auto allocation = it->second;
     allocations_.erase(it);
-    blocks_[allocation.block_number].deallocate(allocation);
+    blocks_.at(allocation.block_number).deallocate(allocation);
   }
 
   HeapBuffer::HeapBuffer(
@@ -1032,10 +1154,13 @@ namespace mr {
     uint32_t alignment)
     : buffer_(context, usage_flags, start_byte_size)
     , heap_(start_byte_size, alignment)
-  {}
+  {
+    MR_TRACY_ZONE_N("HeapBuffer::HeapBuffer");
+  }
 
   vk::DeviceSize HeapBuffer::allocate(vk::DeviceSize size) noexcept
   {
+    MR_TRACY_ZONE_N("HeapBuffer::allocate");
     const auto alloc = heap_.allocate(size);
     if (alloc.resized && heap_.size() > buffer_.capacity()) {
       immediate_submit(buffer_.context(), [&](vk::CommandBuffer cmd) {
@@ -1045,13 +1170,18 @@ namespace mr {
     return alloc.offset;
   }
 
-  void HeapBuffer::free(vk::DeviceSize offset) noexcept { heap_.deallocate(offset); }
+  void HeapBuffer::free(vk::DeviceSize offset) noexcept
+  {
+    MR_TRACY_ZONE_N("HeapBuffer::free");
+    heap_.deallocate(offset);
+  }
 
   void HeapBuffer::write(
     vk::CommandBuffer command_buffer,
     std::span<const std::byte> src,
     vk::DeviceSize offset)
   {
+    MR_TRACY_ZONE_N("HeapBuffer::write");
     buffer_.write(command_buffer, src, offset);
   }
 
@@ -1059,6 +1189,7 @@ namespace mr {
     vk::CommandBuffer command_buffer,
     std::span<const std::byte> src) noexcept
   {
+    MR_TRACY_ZONE_N("HeapBuffer::allocate_and_write");
     const auto offset = allocate(src.size());
     write(command_buffer, src, offset);
     return offset;
@@ -1073,7 +1204,9 @@ namespace mr {
         vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst,
         start_byte_size,
         alignment)
-  {}
+  {
+    MR_TRACY_ZONE_N("VertexHeapBuffer::VertexHeapBuffer");
+  }
 
   IndexHeapBuffer::IndexHeapBuffer(
     const VulkanContext& context,
@@ -1084,10 +1217,13 @@ namespace mr {
         vk::BufferUsageFlagBits::eIndexBuffer | vk::BufferUsageFlagBits::eTransferDst,
         start_byte_size,
         alignment)
-  {}
+  {
+    MR_TRACY_ZONE_N("IndexHeapBuffer::IndexHeapBuffer");
+  }
 
   void copy_buffer(vk::CommandBuffer command_buffer, BufferRegion src, BufferRegion dst)
   {
+    MR_TRACY_ZONE_N("copy_buffer");
     ASSERT(src.context != nullptr && dst.context != nullptr, "null buffer region context");
     ASSERT(src.context == dst.context, "copy between buffers from different VulkanContext objects");
     ASSERT(dst.size >= src.size, "copy would overflow destination buffer");
@@ -1115,6 +1251,7 @@ namespace mr {
     , mip_levels_(mip_levels)
     , aspect_flags_(aspect_flags)
   {
+    MR_TRACY_ZONE_N("Image::Image");
     ASSERT(mip_levels > 0, "mip levels must be >= 1");
 
     vk::ImageCreateInfo image_create_info{};
@@ -1147,8 +1284,9 @@ namespace mr {
     }
   }
 
-  Image::~Image()
+  void Image::destroy_image_resources() noexcept
   {
+    MR_TRACY_ZONE_N("Image::destroy_image_resources");
     if (context_ == nullptr) {
       return;
     }
@@ -1163,14 +1301,25 @@ namespace mr {
     }
   }
 
-  Image::Image(Image&& other) noexcept { *this = std::move(other); }
+  Image::~Image()
+  {
+    MR_TRACY_ZONE_N("Image::~Image");
+    destroy_image_resources();
+  }
+
+  Image::Image(Image&& other) noexcept
+  {
+    MR_TRACY_ZONE_N("Image::Image(move)");
+    *this = std::move(other);
+  }
 
   Image& Image::operator=(Image&& other) noexcept
   {
+    MR_TRACY_ZONE_N("Image::operator=(move)");
     if (this == &other) {
       return *this;
     }
-    this->~Image();
+    destroy_image_resources();
     context_ = other.context_;
     image_ = other.image_;
     image_view_ = other.image_view_;
@@ -1195,6 +1344,7 @@ namespace mr {
 
   void Image::transition_layout(vk::CommandBuffer command_buffer, vk::ImageLayout new_layout)
   {
+    MR_TRACY_ZONE_N("Image::transition_layout");
     transition_layout(command_buffer, new_layout, 0, mip_levels_, false);
   }
 
@@ -1205,6 +1355,7 @@ namespace mr {
     uint32_t mip_counts,
     bool ignore_previous_layout)
   {
+    MR_TRACY_ZONE_N("Image::transition_layout(mip)");
     if (!ignore_previous_layout && new_layout == layout_) {
       return;
     }
@@ -1299,6 +1450,7 @@ namespace mr {
 
   void Image::write(vk::CommandBuffer command_buffer, std::span<const std::byte> src)
   {
+    MR_TRACY_ZONE_N("Image::write");
     ASSERT(src.size() <= size_, "image upload size exceeds allocation");
     HostBuffer staging(*context_, src.size(), vk::BufferUsageFlagBits::eTransferSrc);
     staging.write(src);
@@ -1318,6 +1470,7 @@ namespace mr {
 
   HostBuffer Image::read_to_host_buffer(vk::CommandBuffer command_buffer) noexcept
   {
+    MR_TRACY_ZONE_N("Image::read_to_host_buffer");
     HostBuffer stage_buffer(*context_, size_, vk::BufferUsageFlagBits::eTransferDst);
     transition_layout(command_buffer, vk::ImageLayout::eTransferSrcOptimal);
 
@@ -1337,6 +1490,7 @@ namespace mr {
 
   vk::ImageView Image::create_image_view(uint32_t mip_level, uint32_t mip_levels_count)
   {
+    MR_TRACY_ZONE_N("Image::create_image_view");
     vk::ImageViewCreateInfo create_info{};
     create_info.image = image_;
     create_info.viewType = vk::ImageViewType::e2D;
@@ -1363,6 +1517,7 @@ namespace mr {
     vk::ImageTiling tiling,
     vk::FormatFeatureFlags features)
   {
+    MR_TRACY_ZONE_N("Image::find_supported_format");
     for (auto format : candidates) {
       const vk::FormatProperties props = context.vk_physical_device().getFormatProperties(format);
       if (tiling == vk::ImageTiling::eLinear && (props.linearTilingFeatures & features) == features) {
@@ -1383,6 +1538,7 @@ namespace mr {
     vk::ImageTiling tiling,
     vk::ImageUsageFlags usage)
   {
+    MR_TRACY_ZONE_N("Image::is_image_format_supported");
     vk::PhysicalDeviceImageFormatInfo2 format_info{};
     format_info.format = format;
     format_info.type = image_type;
@@ -1410,7 +1566,9 @@ namespace mr {
         vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent,
         mip_levels,
         true)
-  {}
+  {
+    MR_TRACY_ZONE_N("HostImage::HostImage");
+  }
 
   DeviceImage::DeviceImage(
     const VulkanContext& context,
@@ -1429,7 +1587,9 @@ namespace mr {
         vk::MemoryPropertyFlagBits::eDeviceLocal,
         mip_levels,
         create_image_view)
-  {}
+  {
+    MR_TRACY_ZONE_N("DeviceImage::DeviceImage");
+  }
 
   SwapchainImage::SwapchainImage(
     const VulkanContext& context,
@@ -1438,6 +1598,7 @@ namespace mr {
     vk::Image image,
     vk::ImageView view)
   {
+    MR_TRACY_ZONE_N("SwapchainImage::SwapchainImage");
     context_ = &context;
     image_ = image;
     extent_ = extent;
@@ -1456,7 +1617,11 @@ namespace mr {
     }
   }
 
-  SwapchainImage::~SwapchainImage() { owns_image_ = false; }
+  SwapchainImage::~SwapchainImage()
+  {
+    MR_TRACY_ZONE_N("SwapchainImage::~SwapchainImage");
+    owns_image_ = false;
+  }
 
   TextureImage::TextureImage(
     const VulkanContext& context,
@@ -1472,9 +1637,14 @@ namespace mr {
         vk::ImageAspectFlagBits::eColor,
         mip_levels,
         true)
-  {}
+  {
+    MR_TRACY_ZONE_N("TextureImage::TextureImage");
+  }
 
-  TextureImage::~TextureImage() = default;
+  TextureImage::~TextureImage()
+  {
+    MR_TRACY_ZONE_N("TextureImage::~TextureImage");
+  }
 
   DepthImage::DepthImage(const VulkanContext& context, vk::Extent3D extent, uint32_t mip_levels)
     : DeviceImage(
@@ -1493,10 +1663,13 @@ namespace mr {
         vk::ImageAspectFlagBits::eDepth,
         mip_levels,
         true)
-  {}
+  {
+    MR_TRACY_ZONE_N("DepthImage::DepthImage");
+  }
 
   vk::RenderingAttachmentInfo DepthImage::attachment_info() const
   {
+    MR_TRACY_ZONE_N("DepthImage::attachment_info");
     vk::RenderingAttachmentInfo info{};
     info.imageView = image_view_;
     info.imageLayout = layout_;
@@ -1520,10 +1693,13 @@ namespace mr {
         vk::ImageAspectFlagBits::eColor,
         mip_levels,
         true)
-  {}
+  {
+    MR_TRACY_ZONE_N("ColorAttachmentImage::ColorAttachmentImage");
+  }
 
   vk::RenderingAttachmentInfo ColorAttachmentImage::attachment_info() const
   {
+    MR_TRACY_ZONE_N("ColorAttachmentImage::attachment_info");
     vk::RenderingAttachmentInfo info{};
     info.imageView = image_view_;
     info.imageLayout = layout_;
@@ -1547,7 +1723,9 @@ namespace mr {
         vk::ImageAspectFlagBits::eColor,
         mip_levels,
         create_image_view)
-  {}
+  {
+    MR_TRACY_ZONE_N("StorageImage::StorageImage");
+  }
 
   struct FrameRecorder::Impl {
     enum class ResourceKind : std::uint8_t {
@@ -1627,7 +1805,10 @@ namespace mr {
     Impl& operator=(const Impl&) = delete;
     Impl& operator=(Impl&&) = delete;
     Impl(const VulkanContext& in_context, CreateInfo in_create_info)
-        : context(&in_context), create_info(in_create_info) {
+      : context(&in_context)
+      , create_info(in_create_info)
+    {
+      MR_TRACY_ZONE_N("FrameRecorder::Impl");
       if (create_info.frames_in_flight == 0) {
         create_info.frames_in_flight = 1;
       }
@@ -1651,6 +1832,7 @@ namespace mr {
                                           TracyVkCtx& tracy_ctx,
                                           vk::CommandPool& tracy_pool,
                                           vk::CommandBuffer& tracy_cmd) -> void {
+        MR_TRACY_ZONE_N("FrameRecorder::create_tracy_context");
         vk::CommandPoolCreateInfo pool_info{};
         pool_info.flags = vk::CommandPoolCreateFlagBits::eTransient | vk::CommandPoolCreateFlagBits::eResetCommandBuffer;
         pool_info.queueFamilyIndex = queue_family_for(queue_target);
@@ -1664,7 +1846,7 @@ namespace mr {
         alloc_info.commandBufferCount = 1;
         const auto cmd_rv = context->vk_device().allocateCommandBuffers(alloc_info);
         ASSERT(cmd_rv.result == vk::Result::eSuccess, "FrameRecorder failed to allocate Tracy command buffer");
-        tracy_cmd = cmd_rv.value[0];
+        tracy_cmd = cmd_rv.value.at(0);
 
         tracy_ctx = TracyVkContext(
           static_cast<VkPhysicalDevice>(context->vk_physical_device()),
@@ -1690,6 +1872,7 @@ namespace mr {
 
     ~Impl()
     {
+      MR_TRACY_ZONE_N("FrameRecorder::~Impl");
       if (context == nullptr) {
         return;
       }
@@ -1737,44 +1920,51 @@ namespace mr {
 
     [[nodiscard]] uint32_t queue_family_for(QueueTarget queue_target) const
     {
+      MR_TRACY_ZONE_N("FrameRecorder::queue_family_for");
       return queue_target == QueueTarget::Graphics ? context->graphics_queue_family : context->compute_queue_family;
     }
 
     [[nodiscard]] vk::Queue queue_for(QueueTarget queue_target) const
     {
+      MR_TRACY_ZONE_N("FrameRecorder::queue_for");
       return queue_target == QueueTarget::Graphics ? context->graphics_queue : context->compute_queue;
     }
 
     [[nodiscard]] static uint64_t command_key(vk::CommandBuffer command_buffer)
     {
+      MR_TRACY_ZONE_N("FrameRecorder::command_key");
       return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkCommandBuffer>(command_buffer)));
     }
 
     [[nodiscard]] static uint64_t buffer_key(vk::Buffer buffer)
     {
+      MR_TRACY_ZONE_N("FrameRecorder::buffer_key");
       return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkBuffer>(buffer)));
     }
 
     [[nodiscard]] static uint64_t image_key(vk::Image image)
     {
+      MR_TRACY_ZONE_N("FrameRecorder::image_key");
       return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkImage>(image)));
     }
 
     uint32_t acquire_thread_slot(FrameState& frame_state) const
     {
-      std::lock_guard lock(frame_state.mutex);
+      MR_TRACY_ZONE_N("FrameRecorder::acquire_thread_slot");
+      std::scoped_lock lock(frame_state.mutex);
       const std::thread::id tid = std::this_thread::get_id();
       if (const auto it = frame_state.thread_slots.find(tid); it != frame_state.thread_slots.end()) {
         return it->second;
       }
       const auto slot = static_cast<uint32_t>(frame_state.thread_slots.size() % create_info.max_recording_threads);
-      frame_state.thread_slots[tid] = slot;
+      frame_state.thread_slots.insert_or_assign(tid, slot);
       return slot;
     }
 
     vk::CommandPool& command_pool_for(FrameState& frame_state, uint32_t thread_slot, QueueTarget queue_target) const
     {
-      PerThreadCommandPools& pools = frame_state.thread_pools[thread_slot];
+      MR_TRACY_ZONE_N("FrameRecorder::command_pool_for");
+      PerThreadCommandPools& pools = frame_state.thread_pools.at(thread_slot);
       vk::CommandPool& selected_pool =
         queue_target == QueueTarget::Graphics ? pools.graphics_pool : pools.compute_pool;
       if (selected_pool) {
@@ -1802,9 +1992,26 @@ namespace mr {
     MR_TRACY_ZONE;
   }
 
-  FrameRecorder::~FrameRecorder() = default;
-  FrameRecorder::FrameRecorder(FrameRecorder&&) noexcept = default;
-  FrameRecorder& FrameRecorder::operator=(FrameRecorder&&) noexcept = default;
+  FrameRecorder::~FrameRecorder()
+  {
+    MR_TRACY_ZONE_N("FrameRecorder::~FrameRecorder");
+  }
+
+  FrameRecorder::FrameRecorder(FrameRecorder&& other) noexcept
+    : impl_(std::move(other.impl_))
+  {
+    MR_TRACY_ZONE_N("FrameRecorder::FrameRecorder(move)");
+  }
+
+  FrameRecorder& FrameRecorder::operator=(FrameRecorder&& other) noexcept
+  {
+    MR_TRACY_ZONE_N("FrameRecorder::operator=(move)");
+    if (this == &other) {
+      return *this;
+    }
+    impl_ = std::move(other.impl_);
+    return *this;
+  }
 
   std::expected<void, std::string> FrameRecorder::begin_frame(uint64_t frame_index)
   {
@@ -1814,7 +2021,7 @@ namespace mr {
     }
     impl_->active_frame_number = frame_index;
     FrameRecorder::Impl::FrameState& frame_state =
-      *impl_->frames[frame_index % impl_->create_info.frames_in_flight];
+      *impl_->frames.at(static_cast<size_t>(frame_index % impl_->create_info.frames_in_flight));
 
     if (frame_state.completion_timeline_value > 0) {
       vk::SemaphoreWaitInfo wait_info{};
@@ -1827,11 +2034,11 @@ namespace mr {
       }
     }
 
-    std::lock_guard lock(frame_state.mutex);
+    std::scoped_lock lock(frame_state.mutex);
     frame_state.graphics_submissions.clear();
     frame_state.compute_submissions.clear();
     {
-      std::lock_guard usage_lock(impl_->resource_mutex);
+      std::scoped_lock usage_lock(impl_->resource_mutex);
       impl_->pending_usages.clear();
     }
     for (auto& pools : frame_state.thread_pools) {
@@ -1864,7 +2071,7 @@ namespace mr {
       return std::unexpected("FrameRecorder is not initialized");
     }
     FrameRecorder::Impl::FrameState& frame_state =
-      *impl_->frames[impl_->active_frame_number % impl_->create_info.frames_in_flight];
+      *impl_->frames.at(static_cast<size_t>(impl_->active_frame_number % impl_->create_info.frames_in_flight));
     const uint32_t thread_slot = impl_->acquire_thread_slot(frame_state);
     vk::CommandPool& command_pool = impl_->command_pool_for(frame_state, thread_slot, queue_target);
 
@@ -1879,12 +2086,12 @@ namespace mr {
 
     vk::CommandBufferBeginInfo begin_info{};
     begin_info.flags = usage_flags;
-    if (cmd_rv.value[0].begin(begin_info) != vk::Result::eSuccess) {
+    if (cmd_rv.value.at(0).begin(begin_info) != vk::Result::eSuccess) {
       return std::unexpected("FrameRecorder command buffer begin failed");
     }
 
     return RecordedCommandBuffer{
-      .handle = cmd_rv.value[0],
+      .handle = cmd_rv.value.at(0),
       .queue_target = queue_target,
       .queue_family = impl_->queue_family_for(queue_target),
     };
@@ -1925,8 +2132,9 @@ namespace mr {
     usage.access = usage_desc.access;
     usage.writes = usage_desc.writes;
 
-    std::lock_guard lock(impl_->resource_mutex);
-    impl_->pending_usages[Impl::command_key(command_buffer.handle)].push_back(usage);
+    std::scoped_lock lock(impl_->resource_mutex);
+    const uint64_t cmd_key = Impl::command_key(command_buffer.handle);
+    impl_->pending_usages.try_emplace(cmd_key).first->second.push_back(usage);
   }
 
   void FrameRecorder::declare_image_usage(
@@ -1948,8 +2156,9 @@ namespace mr {
     usage.access = usage_desc.access;
     usage.writes = usage_desc.writes;
 
-    std::lock_guard lock(impl_->resource_mutex);
-    impl_->pending_usages[Impl::command_key(command_buffer.handle)].push_back(usage);
+    std::scoped_lock lock(impl_->resource_mutex);
+    const uint64_t cmd_key = Impl::command_key(command_buffer.handle);
+    impl_->pending_usages.try_emplace(cmd_key).first->second.push_back(usage);
   }
 
   void FrameRecorder::enqueue_for_submit(const RecordedCommandBuffer& command_buffer)
@@ -1957,17 +2166,17 @@ namespace mr {
     MR_TRACY_ZONE_N("FrameRecorder::enqueue_for_submit");
     ASSERT(impl_ != nullptr, "FrameRecorder is not initialized");
     FrameRecorder::Impl::FrameState& frame_state =
-      *impl_->frames[impl_->active_frame_number % impl_->create_info.frames_in_flight];
+      *impl_->frames.at(static_cast<size_t>(impl_->active_frame_number % impl_->create_info.frames_in_flight));
     std::vector<Impl::ResourceUsage> usages{};
     {
-      std::lock_guard usage_lock(impl_->resource_mutex);
+      std::scoped_lock usage_lock(impl_->resource_mutex);
       const uint64_t command_buffer_key = Impl::command_key(command_buffer.handle);
       if (const auto it = impl_->pending_usages.find(command_buffer_key); it != impl_->pending_usages.end()) {
         usages = std::move(it->second);
         impl_->pending_usages.erase(it);
       }
     }
-    std::lock_guard lock(frame_state.mutex);
+    std::scoped_lock lock(frame_state.mutex);
     Impl::EnqueuedSubmission submission{
       .command_buffer = command_buffer,
       .usages = std::move(usages),
@@ -1979,6 +2188,7 @@ namespace mr {
     }
   }
 
+  // NOLINTNEXTLINE(readability-function-cognitive-complexity)
   std::expected<uint64_t, std::string> FrameRecorder::submit_frame()
   {
     MR_TRACY_ZONE_N("FrameRecorder::submit_frame");
@@ -1986,12 +2196,12 @@ namespace mr {
       return std::unexpected("FrameRecorder is not initialized");
     }
     FrameRecorder::Impl::FrameState& frame_state =
-      *impl_->frames[impl_->active_frame_number % impl_->create_info.frames_in_flight];
+      *impl_->frames.at(static_cast<size_t>(impl_->active_frame_number % impl_->create_info.frames_in_flight));
 
     std::vector<Impl::EnqueuedSubmission> graphics_submissions{};
     std::vector<Impl::EnqueuedSubmission> compute_submissions{};
     {
-      std::lock_guard lock(frame_state.mutex);
+      std::scoped_lock lock(frame_state.mutex);
       graphics_submissions = frame_state.graphics_submissions;
       compute_submissions = frame_state.compute_submissions;
     }
@@ -2008,8 +2218,8 @@ namespace mr {
     };
 
     std::array<std::vector<Impl::EnqueuedSubmission>, queue_count> submissions_by_queue{};
-    submissions_by_queue[queue_index(QueueTarget::Graphics)] = std::move(graphics_submissions);
-    submissions_by_queue[queue_index(QueueTarget::ComputeTransfer)] = std::move(compute_submissions);
+    submissions_by_queue.at(queue_index(QueueTarget::Graphics)) = std::move(graphics_submissions);
+    submissions_by_queue.at(queue_index(QueueTarget::ComputeTransfer)) = std::move(compute_submissions);
 
     std::array<std::vector<vk::BufferMemoryBarrier2>, queue_count> acquire_buffer_barriers{};
     std::array<std::vector<vk::ImageMemoryBarrier2>, queue_count> acquire_image_barriers{};
@@ -2019,15 +2229,15 @@ namespace mr {
     std::array<bool, queue_count> queue_has_work{false, false};
 
     for (size_t queue_i = 0; queue_i < queue_count; ++queue_i) {
-      queue_has_work[queue_i] = !submissions_by_queue[queue_i].empty();
-      for (const auto& submission : submissions_by_queue[queue_i]) {
+      queue_has_work.at(queue_i) = !submissions_by_queue.at(queue_i).empty();
+      for (const auto& submission : submissions_by_queue.at(queue_i)) {
         std::vector<vk::BufferMemoryBarrier2> same_queue_buffer_barriers{};
         std::vector<vk::ImageMemoryBarrier2> same_queue_image_barriers{};
         same_queue_buffer_barriers.reserve(submission.usages.size());
         same_queue_image_barriers.reserve(submission.usages.size());
 
         {
-          std::lock_guard state_lock(impl_->resource_mutex);
+          std::scoped_lock state_lock(impl_->resource_mutex);
           for (const auto& usage : submission.usages) {
             const auto prev_it = impl_->resource_states.find(usage.resource_key);
             const bool has_prev = prev_it != impl_->resource_states.end();
@@ -2066,8 +2276,8 @@ namespace mr {
             } else if (has_prev && different_queue_family) {
               const size_t producer_queue_i = queue_index(prev_it->second.queue_target);
               const size_t consumer_queue_i = queue_index(submission.command_buffer.queue_target);
-              queue_wait_from_other[consumer_queue_i] = true;
-              queue_has_work[producer_queue_i] = true;
+              queue_wait_from_other.at(consumer_queue_i) = true;
+              queue_has_work.at(producer_queue_i) = true;
 
               if (usage.kind == Impl::ResourceKind::Buffer) {
                 vk::BufferMemoryBarrier2 release_barrier{};
@@ -2080,7 +2290,7 @@ namespace mr {
                 release_barrier.buffer = usage.buffer;
                 release_barrier.offset = usage.offset;
                 release_barrier.size = usage.size;
-                release_buffer_barriers[producer_queue_i].push_back(release_barrier);
+                release_buffer_barriers.at(producer_queue_i).push_back(release_barrier);
 
                 vk::BufferMemoryBarrier2 acquire_barrier{};
                 acquire_barrier.srcStageMask = prev_it->second.stage;
@@ -2092,7 +2302,7 @@ namespace mr {
                 acquire_barrier.buffer = usage.buffer;
                 acquire_barrier.offset = usage.offset;
                 acquire_barrier.size = usage.size;
-                acquire_buffer_barriers[consumer_queue_i].push_back(acquire_barrier);
+                acquire_buffer_barriers.at(consumer_queue_i).push_back(acquire_barrier);
               } else {
                 vk::ImageMemoryBarrier2 release_barrier{};
                 release_barrier.srcStageMask = prev_it->second.stage;
@@ -2105,7 +2315,7 @@ namespace mr {
                 release_barrier.dstQueueFamilyIndex = submission.command_buffer.queue_family;
                 release_barrier.image = usage.image;
                 release_barrier.subresourceRange = usage.subresource_range;
-                release_image_barriers[producer_queue_i].push_back(release_barrier);
+                release_image_barriers.at(producer_queue_i).push_back(release_barrier);
 
                 vk::ImageMemoryBarrier2 acquire_barrier{};
                 acquire_barrier.srcStageMask = prev_it->second.stage;
@@ -2118,19 +2328,21 @@ namespace mr {
                 acquire_barrier.dstQueueFamilyIndex = submission.command_buffer.queue_family;
                 acquire_barrier.image = usage.image;
                 acquire_barrier.subresourceRange = usage.subresource_range;
-                acquire_image_barriers[consumer_queue_i].push_back(acquire_barrier);
+                acquire_image_barriers.at(consumer_queue_i).push_back(acquire_barrier);
               }
             }
 
-            impl_->resource_states[usage.resource_key] = Impl::ResourceState{
-              .kind = usage.kind,
-              .queue_target = submission.command_buffer.queue_target,
-              .queue_family = submission.command_buffer.queue_family,
-              .stage = usage.stage,
-              .access = usage.access,
-              .layout = usage.layout,
-              .writes = usage.writes,
-            };
+            impl_->resource_states.insert_or_assign(
+              usage.resource_key,
+              Impl::ResourceState{
+                .kind = usage.kind,
+                .queue_target = submission.command_buffer.queue_target,
+                .queue_family = submission.command_buffer.queue_family,
+                .stage = usage.stage,
+                .access = usage.access,
+                .layout = usage.layout,
+                .writes = usage.writes,
+              });
           }
         }
 
@@ -2146,7 +2358,7 @@ namespace mr {
           if (barrier_cmd_rv.result != vk::Result::eSuccess) {
             return std::unexpected("FrameRecorder failed to allocate same-queue barrier command buffer");
           }
-          vk::CommandBuffer barrier_cmd = barrier_cmd_rv.value[0];
+          vk::CommandBuffer barrier_cmd = barrier_cmd_rv.value.at(0);
           vk::CommandBufferBeginInfo begin_info{};
           begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
           if (barrier_cmd.begin(begin_info) != vk::Result::eSuccess) {
@@ -2167,15 +2379,15 @@ namespace mr {
             .queue_target = submission.command_buffer.queue_target,
             .queue_family = submission.command_buffer.queue_family,
           };
-          submissions_by_queue[queue_i].insert(
-            submissions_by_queue[queue_i].begin(),
+          submissions_by_queue.at(queue_i).insert(
+            submissions_by_queue.at(queue_i).begin(),
             std::move(barrier_submission));
         }
       }
     }
 
-    if (queue_wait_from_other[queue_index(QueueTarget::Graphics)] &&
-      queue_wait_from_other[queue_index(QueueTarget::ComputeTransfer)]) {
+    if (queue_wait_from_other.at(queue_index(QueueTarget::Graphics)) &&
+      queue_wait_from_other.at(queue_index(QueueTarget::ComputeTransfer))) {
       return std::unexpected("FrameRecorder detected cyclic cross-queue dependencies in a single frame");
     }
 
@@ -2196,7 +2408,7 @@ namespace mr {
       if (cmd_rv.result != vk::Result::eSuccess) {
         return std::unexpected("FrameRecorder failed to allocate cross-queue barrier command buffer");
       }
-      vk::CommandBuffer cmd = cmd_rv.value[0];
+      vk::CommandBuffer cmd = cmd_rv.value.at(0);
       vk::CommandBufferBeginInfo begin_info{};
       begin_info.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
       if (cmd.begin(begin_info) != vk::Result::eSuccess) {
@@ -2216,7 +2428,8 @@ namespace mr {
 
     for (size_t queue_i = 0; queue_i < queue_count; ++queue_i) {
       const QueueTarget target = queue_from_index(queue_i);
-      if (auto barrier_cmd = record_queue_barriers(target, acquire_buffer_barriers[queue_i], acquire_image_barriers[queue_i]);
+      if (auto barrier_cmd =
+            record_queue_barriers(target, acquire_buffer_barriers.at(queue_i), acquire_image_barriers.at(queue_i));
         barrier_cmd.has_value() && barrier_cmd.value()) {
         Impl::EnqueuedSubmission acquire_submission{};
         acquire_submission.command_buffer = {
@@ -2224,13 +2437,14 @@ namespace mr {
           .queue_target = target,
           .queue_family = impl_->queue_family_for(target),
         };
-        submissions_by_queue[queue_i].insert(submissions_by_queue[queue_i].begin(), std::move(acquire_submission));
-        queue_has_work[queue_i] = true;
+        submissions_by_queue.at(queue_i).insert(submissions_by_queue.at(queue_i).begin(), std::move(acquire_submission));
+        queue_has_work.at(queue_i) = true;
       } else if (!barrier_cmd.has_value()) {
         return std::unexpected(barrier_cmd.error());
       }
 
-      if (auto barrier_cmd = record_queue_barriers(target, release_buffer_barriers[queue_i], release_image_barriers[queue_i]);
+      if (auto barrier_cmd =
+            record_queue_barriers(target, release_buffer_barriers.at(queue_i), release_image_barriers.at(queue_i));
         barrier_cmd.has_value() && barrier_cmd.value()) {
         Impl::EnqueuedSubmission release_submission{};
         release_submission.command_buffer = {
@@ -2238,8 +2452,8 @@ namespace mr {
           .queue_target = target,
           .queue_family = impl_->queue_family_for(target),
         };
-        submissions_by_queue[queue_i].push_back(std::move(release_submission));
-        queue_has_work[queue_i] = true;
+        submissions_by_queue.at(queue_i).push_back(std::move(release_submission));
+        queue_has_work.at(queue_i) = true;
       } else if (!barrier_cmd.has_value()) {
         return std::unexpected(barrier_cmd.error());
       }
@@ -2249,12 +2463,12 @@ namespace mr {
     uint64_t final_timeline_value = impl_->timeline_counter;
     const auto submit_queue = [&](QueueTarget queue_target) -> std::expected<void, std::string> {
       const size_t idx = queue_index(queue_target);
-      if (!queue_has_work[idx] || submissions_by_queue[idx].empty()) {
+      if (!queue_has_work.at(idx) || submissions_by_queue.at(idx).empty()) {
         return {};
       }
       std::vector<vk::CommandBufferSubmitInfo> command_infos{};
-      command_infos.reserve(submissions_by_queue[idx].size());
-      for (const auto& submission : submissions_by_queue[idx]) {
+      command_infos.reserve(submissions_by_queue.at(idx).size());
+      for (const auto& submission : submissions_by_queue.at(idx)) {
         vk::CommandBufferSubmitInfo cmd_info{};
         cmd_info.commandBuffer = submission.command_buffer.handle;
         command_infos.push_back(cmd_info);
@@ -2262,10 +2476,10 @@ namespace mr {
 
       std::vector<vk::SemaphoreSubmitInfo> wait_infos{};
       const size_t other_idx = idx == 0 ? 1 : 0;
-      if (queue_wait_from_other[idx] && queue_signal_values[other_idx] > 0) {
+      if (queue_wait_from_other.at(idx) && queue_signal_values.at(other_idx) > 0) {
         vk::SemaphoreSubmitInfo wait_info{};
         wait_info.semaphore = impl_->timeline_semaphore;
-        wait_info.value = queue_signal_values[other_idx];
+        wait_info.value = queue_signal_values.at(other_idx);
         wait_info.stageMask = vk::PipelineStageFlagBits2::eAllCommands;
         wait_infos.push_back(wait_info);
       }
@@ -2295,12 +2509,12 @@ namespace mr {
         TracyVkCollect(impl_->tracy_compute_ctx, static_cast<VkCommandBuffer>(impl_->tracy_compute_cmd));
       }
 #endif
-      queue_signal_values[idx] = signal_value;
+      queue_signal_values.at(idx) = signal_value;
       final_timeline_value = signal_value;
       return {};
     };
 
-    if (queue_wait_from_other[queue_index(QueueTarget::ComputeTransfer)]) {
+    if (queue_wait_from_other.at(queue_index(QueueTarget::ComputeTransfer))) {
       if (const auto submit_result = submit_queue(QueueTarget::Graphics); !submit_result.has_value()) {
         return std::unexpected(submit_result.error());
       }
@@ -2340,6 +2554,7 @@ namespace mr {
 
   GraphicsPipeline::~GraphicsPipeline()
   {
+    MR_TRACY_ZONE_N("GraphicsPipeline::~GraphicsPipeline");
     if (context_ == nullptr) {
       return;
     }
@@ -2355,11 +2570,13 @@ namespace mr {
 
   GraphicsPipeline::GraphicsPipeline(GraphicsPipeline&& other) noexcept
   {
+    MR_TRACY_ZONE_N("GraphicsPipeline::GraphicsPipeline(move)");
     *this = std::move(other);
   }
 
   GraphicsPipeline& GraphicsPipeline::operator=(GraphicsPipeline&& other) noexcept
   {
+    MR_TRACY_ZONE_N("GraphicsPipeline::operator=(move)");
     if (this == &other) {
       return *this;
     }
@@ -2381,6 +2598,7 @@ namespace mr {
 
   void GraphicsPipeline::bind(vk::CommandBuffer command_buffer) const
   {
+    MR_TRACY_ZONE_N("GraphicsPipeline::bind");
     ASSERT(pipeline_, "graphics pipeline is not initialized");
     command_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline_);
   }
@@ -2388,6 +2606,7 @@ namespace mr {
   std::expected<GraphicsPipeline, std::string>
   build_graphics_pipeline(const VulkanContext& context, const GraphicsPipelineDesc& desc)
   {
+    MR_TRACY_ZONE_N("build_graphics_pipeline");
     if (desc.shader_stages.empty()) {
       return std::unexpected("graphics pipeline requires at least one shader stage");
     }
@@ -2509,6 +2728,7 @@ namespace mr {
   GraphicsPipelineBuilder&
   GraphicsPipelineBuilder::set_bindings(std::span<const vk::VertexInputBindingDescription> bindings)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_bindings");
     desc_.vertex_bindings.assign(bindings.begin(), bindings.end());
     return *this;
   }
@@ -2516,6 +2736,7 @@ namespace mr {
   GraphicsPipelineBuilder&
   GraphicsPipelineBuilder::set_attributes(std::span<const vk::VertexInputAttributeDescription> attributes)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_attributes");
     desc_.vertex_attributes.assign(attributes.begin(), attributes.end());
     return *this;
   }
@@ -2523,12 +2744,14 @@ namespace mr {
   GraphicsPipelineBuilder&
   GraphicsPipelineBuilder::set_shader_stages(std::span<const GraphicsShaderStageDesc> stages)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_shader_stages");
     desc_.shader_stages.assign(stages.begin(), stages.end());
     return *this;
   }
 
   GraphicsPipelineBuilder& GraphicsPipelineBuilder::add_shader_stage(GraphicsShaderStageDesc stage)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::add_shader_stage");
     desc_.shader_stages.push_back(stage);
     return *this;
   }
@@ -2536,6 +2759,7 @@ namespace mr {
   GraphicsPipelineBuilder&
   GraphicsPipelineBuilder::set_descriptor_set_layouts(std::span<const vk::DescriptorSetLayout> layouts)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_descriptor_set_layouts");
     desc_.descriptor_set_layouts.assign(layouts.begin(), layouts.end());
     return *this;
   }
@@ -2543,6 +2767,7 @@ namespace mr {
   GraphicsPipelineBuilder&
   GraphicsPipelineBuilder::set_push_constants(std::span<const vk::PushConstantRange> ranges)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_push_constants");
     desc_.push_constant_ranges.assign(ranges.begin(), ranges.end());
     return *this;
   }
@@ -2550,6 +2775,7 @@ namespace mr {
   GraphicsPipelineBuilder&
   GraphicsPipelineBuilder::set_dynamic_states(std::span<const vk::DynamicState> states)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_dynamic_states");
     desc_.dynamic_states.assign(states.begin(), states.end());
     return *this;
   }
@@ -2557,6 +2783,7 @@ namespace mr {
   GraphicsPipelineBuilder&
   GraphicsPipelineBuilder::set_color_attachment_formats(std::span<const vk::Format> formats)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_color_attachment_formats");
     desc_.color_attachment_formats.assign(formats.begin(), formats.end());
     return *this;
   }
@@ -2565,6 +2792,7 @@ namespace mr {
   GraphicsPipelineBuilder::set_color_blend_attachments(
     std::span<const vk::PipelineColorBlendAttachmentState> attachments)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_color_blend_attachments");
     desc_.color_blend_attachments.assign(attachments.begin(), attachments.end());
     return *this;
   }
@@ -2572,24 +2800,28 @@ namespace mr {
   GraphicsPipelineBuilder&
   GraphicsPipelineBuilder::set_depth_attachment_format(std::optional<vk::Format> format)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_depth_attachment_format");
     desc_.depth_attachment_format = format;
     return *this;
   }
 
   GraphicsPipelineBuilder& GraphicsPipelineBuilder::set_topology(vk::PrimitiveTopology topology)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_topology");
     desc_.topology = topology;
     return *this;
   }
 
   GraphicsPipelineBuilder& GraphicsPipelineBuilder::set_cull_mode(vk::CullModeFlags cull_mode)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_cull_mode");
     desc_.cull_mode = cull_mode;
     return *this;
   }
 
   GraphicsPipelineBuilder& GraphicsPipelineBuilder::set_front_face(vk::FrontFace front_face)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_front_face");
     desc_.front_face = front_face;
     return *this;
   }
@@ -2597,6 +2829,7 @@ namespace mr {
   GraphicsPipelineBuilder&
   GraphicsPipelineBuilder::set_depth_state(bool test_enable, bool write_enable, vk::CompareOp compare_op)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_depth_state");
     desc_.depth_test_enable = test_enable;
     desc_.depth_write_enable = write_enable;
     desc_.depth_compare_op = compare_op;
@@ -2605,30 +2838,35 @@ namespace mr {
 
   GraphicsPipelineBuilder& GraphicsPipelineBuilder::set_samples(vk::SampleCountFlagBits samples)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_samples");
     desc_.samples = samples;
     return *this;
   }
 
   GraphicsPipelineBuilder& GraphicsPipelineBuilder::set_line_width(float line_width)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_line_width");
     desc_.line_width = line_width;
     return *this;
   }
 
   GraphicsPipelineBuilder& GraphicsPipelineBuilder::set_primitive_restart(bool enable)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_primitive_restart");
     desc_.primitive_restart_enable = enable;
     return *this;
   }
 
   GraphicsPipelineBuilder& GraphicsPipelineBuilder::set_polygon_mode(vk::PolygonMode polygon_mode)
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::set_polygon_mode");
     desc_.polygon_mode = polygon_mode;
     return *this;
   }
 
   std::expected<GraphicsPipeline, std::string> GraphicsPipelineBuilder::build() const
   {
+    MR_TRACY_ZONE_N("GraphicsPipelineBuilder::build");
     ASSERT(context_ != nullptr, "GraphicsPipelineBuilder requires a valid VulkanContext");
     return build_graphics_pipeline(*context_, desc_);
   }
