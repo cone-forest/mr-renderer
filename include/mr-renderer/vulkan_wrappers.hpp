@@ -32,6 +32,8 @@ namespace mr {
     bool timeline_semaphore = false;
     bool synchronization2 = false;
     bool dynamic_rendering = false;
+    /// Both extensions + features (includes shader untyped pointers). Requires buffer device address.
+    bool descriptor_heap = false;
   };
 
   struct VulkanContextCreateInfo {
@@ -61,6 +63,8 @@ namespace mr {
     vk::Queue present_queue{};
 
     VulkanFeatureSupport feature_support{};
+    /// Populated when `feature_support.descriptor_heap` is true (sizes for `vkWrite*DescriptorsEXT` / heaps).
+    vk::PhysicalDeviceDescriptorHeapPropertiesEXT descriptor_heap_properties{};
     std::vector<std::string> enabled_extensions;
     vk::PipelineCache pipeline_cache{};
     std::string pipeline_cache_path;

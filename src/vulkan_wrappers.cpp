@@ -94,12 +94,16 @@ namespace mr {
       vk::PhysicalDeviceVulkan13Features features_13{};
       vk::PhysicalDeviceDescriptorIndexingFeatures descriptor_indexing{};
       vk::PhysicalDeviceMeshShaderFeaturesEXT mesh_shader{};
+      vk::PhysicalDeviceShaderUntypedPointersFeaturesKHR shader_untyped{};
+      vk::PhysicalDeviceDescriptorHeapFeaturesEXT descriptor_heap_features{};
 
       core_features.pNext = &features_11;
       features_11.pNext = &features_12;
       features_12.pNext = &features_13;
       features_13.pNext = &descriptor_indexing;
       descriptor_indexing.pNext = &mesh_shader;
+      mesh_shader.pNext = &shader_untyped;
+      shader_untyped.pNext = &descriptor_heap_features;
 
       vk::PhysicalDevice(physical_device.physical_device).getFeatures2(&core_features);
 
@@ -125,6 +129,11 @@ namespace mr {
       support.mesh_shader = support.mesh_shader && mesh_shader.meshShader == VK_TRUE;
       support.task_shader = support.task_shader && mesh_shader.taskShader == VK_TRUE;
       support.draw_indirect_count = support.draw_indirect_count || features_12.drawIndirectCount == VK_TRUE;
+
+      support.descriptor_heap =
+        support.buffer_device_address && has_extension(available_extensions, VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME) &&
+        has_extension(available_extensions, VK_KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME) &&
+        descriptor_heap_features.descriptorHeap == vk::True && shader_untyped.shaderUntypedPointers == vk::True;
 
       return support;
     }
@@ -175,6 +184,22 @@ namespace mr {
       features_13.synchronization2 = support.synchronization2 ? VK_TRUE : VK_FALSE;
       features_13.dynamicRendering = support.dynamic_rendering ? VK_TRUE : VK_FALSE;
       static_cast<void>(physical_device.enable_extension_features_if_present(features_13));
+
+      if (support.descriptor_heap) {
+        static_cast<void>(physical_device.enable_extension_if_present(VK_KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME));
+        static_cast<void>(physical_device.enable_extension_if_present(VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME));
+
+        VkPhysicalDeviceShaderUntypedPointersFeaturesKHR shader_untyped{};
+        shader_untyped.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_UNTYPED_POINTERS_FEATURES_KHR;
+        shader_untyped.shaderUntypedPointers = VK_TRUE;
+        static_cast<void>(physical_device.enable_extension_features_if_present(shader_untyped));
+
+        VkPhysicalDeviceDescriptorHeapFeaturesEXT heap_features{};
+        heap_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_HEAP_FEATURES_EXT;
+        heap_features.descriptorHeap = VK_TRUE;
+        heap_features.descriptorHeapCaptureReplay = VK_FALSE;
+        static_cast<void>(physical_device.enable_extension_features_if_present(heap_features));
+      }
     }
 
     size_t format_byte_size(vk::Format format)
@@ -321,14 +346,29 @@ namespace mr {
       if (!create_info.headless || create_info.require_present) {
         selector.add_required_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
       }
+      selector.add_required_extension(VK_KHR_SHADER_UNTYPED_POINTERS_EXTENSION_NAME);
+      selector.add_required_extension(VK_EXT_DESCRIPTOR_HEAP_EXTENSION_NAME);
       auto physical_result = selector.select();
       if (!physical_result.has_value()) {
         return std::unexpected("vk-bootstrap failed to select a Vulkan physical device");
       }
       context.physical_device = physical_result.value();
       context.feature_support = query_feature_support(context.physical_device);
+      if (!context.feature_support.descriptor_heap) {
+        return std::unexpected(
+          "Vulkan device must support VK_EXT_descriptor_heap, VK_KHR_shader_untyped_pointers, "
+          "bufferDeviceAddress, and corresponding features");
+      }
       enable_optional_features(context.physical_device, context.feature_support);
       context.enabled_extensions = context.physical_device.get_extensions();
+
+      {
+        vk::PhysicalDeviceDescriptorHeapPropertiesEXT heap_props{};
+        vk::PhysicalDeviceProperties2 props2{};
+        props2.pNext = &heap_props;
+        vk::PhysicalDevice(context.physical_device.physical_device).getProperties2(&props2);
+        context.descriptor_heap_properties = heap_props;
+      }
 
       const auto queue_props = context.physical_device.get_queue_families();
       if (queue_props.empty()) {
@@ -482,6 +522,7 @@ namespace mr {
     , compute_queue(other.compute_queue)
     , present_queue(other.present_queue)
     , feature_support(other.feature_support)
+    , descriptor_heap_properties(other.descriptor_heap_properties)
     , enabled_extensions(std::move(other.enabled_extensions))
     , pipeline_cache(other.pipeline_cache)
     , pipeline_cache_path(std::move(other.pipeline_cache_path))
@@ -534,6 +575,7 @@ namespace mr {
     compute_queue = other.compute_queue;
     present_queue = other.present_queue;
     feature_support = other.feature_support;
+    descriptor_heap_properties = other.descriptor_heap_properties;
     enabled_extensions = std::move(other.enabled_extensions);
     pipeline_cache = other.pipeline_cache;
     pipeline_cache_path = std::move(other.pipeline_cache_path);

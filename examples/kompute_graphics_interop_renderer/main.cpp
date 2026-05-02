@@ -10,7 +10,7 @@
 int main()
 try {
   ZoneScoped;
-  int frames_number = 1 << 14;
+  int frames_number = 1 << 30;
 
   if (std::getenv("MR_RENDERER_INTEROP_WINDOW") != nullptr) {
     mr::WindowPresenter presenter{256, 256};
